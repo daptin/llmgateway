@@ -78,9 +78,15 @@ func TestResponsesRejectStateAndPreserveTypedInput(t *testing.T) {
 		}}}, Usage: contract.Usage{InputTokens: 5, OutputTokens: 1, TotalTokens: 6},
 	}}
 	handler := testHandler(t, engine, fakeAuthenticator{})
-	stateful := perform(handler, http.MethodPost, "/v1/responses", `{"model":"allowed","input":"hello","store":true}`, "key")
-	if stateful.Code != http.StatusBadRequest || !strings.Contains(stateful.Body.String(), "stateful responses") {
-		t.Fatalf("stateful request was not explicitly rejected: %d %s", stateful.Code, stateful.Body.String())
+	for _, body := range []string{
+		`{"model":"allowed","input":"hello","store":true}`,
+		`{"model":"allowed","input":"hello","store":false}`,
+		`{"model":"allowed","input":"hello","previous_response_id":""}`,
+	} {
+		stateful := perform(handler, http.MethodPost, "/v1/responses", body, "key")
+		if stateful.Code != http.StatusBadRequest || !strings.Contains(stateful.Body.String(), "stateful responses") {
+			t.Fatalf("stateful request was not explicitly rejected: %d %s", stateful.Code, stateful.Body.String())
+		}
 	}
 	body := `{"model":"allowed","instructions":"be concise","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"weather"},{"type":"input_image","image_url":"https://example.test/sky.png","detail":"low"}]},{"type":"function_call_output","call_id":"call_1","output":"sunny"}],"tools":[{"type":"function","name":"weather","parameters":{"type":"object"}}],"text":{"format":{"type":"json_schema","name":"forecast","schema":{"type":"object"}}},"max_output_tokens":20}`
 	response := perform(handler, http.MethodPost, "/v1/responses", body, "key")

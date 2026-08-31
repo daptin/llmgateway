@@ -34,9 +34,10 @@ type Comparison struct {
 }
 
 type Endpoint struct {
-	Method string             `json:"method"`
-	Path   string             `json:"path"`
-	Fields map[string]Support `json:"fields"`
+	Method         string             `json:"method"`
+	Path           string             `json:"path"`
+	RequestFields  map[string]Support `json:"request_fields"`
+	ResponseFields map[string]Support `json:"response_fields"`
 }
 
 type Provider struct {
@@ -87,9 +88,14 @@ func (m Manifest) Validate() error {
 			return fmt.Errorf("duplicate endpoint %q", key)
 		}
 		endpoints[key] = struct{}{}
-		for field, support := range endpoint.Fields {
-			if strings.TrimSpace(field) == "" || !validSupport(support) {
-				return fmt.Errorf("endpoint %q has invalid field support for %q", key, field)
+		if endpoint.RequestFields == nil || endpoint.ResponseFields == nil {
+			return fmt.Errorf("endpoint %q must declare request_fields and response_fields", key)
+		}
+		for direction, fields := range map[string]map[string]Support{"request": endpoint.RequestFields, "response": endpoint.ResponseFields} {
+			for field, support := range fields {
+				if strings.TrimSpace(field) == "" || !validSupport(support) {
+					return fmt.Errorf("endpoint %q has invalid %s field support for %q", key, direction, field)
+				}
 			}
 		}
 	}

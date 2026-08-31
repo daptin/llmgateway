@@ -22,7 +22,7 @@ type responsesRequest struct {
 	Text               *responseText   `json:"text,omitempty"`
 	MaxOutputTokens    *int64          `json:"max_output_tokens,omitempty"`
 	Store              *bool           `json:"store,omitempty"`
-	PreviousResponseID string          `json:"previous_response_id,omitempty"`
+	PreviousResponseID *string         `json:"previous_response_id,omitempty"`
 }
 
 type responseText struct {
@@ -109,7 +109,7 @@ func (h *Handler) canonicalResponse(id contract.ID, wire responsesRequest, reque
 	if strings.TrimSpace(wire.Model) == "" || len(bytes.TrimSpace(wire.Input)) == 0 {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "model and input are required", http.StatusBadRequest, false, nil)
 	}
-	if (wire.Store != nil && *wire.Store) || wire.PreviousResponseID != "" {
+	if wire.Store != nil || wire.PreviousResponseID != nil {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "stateful responses are not supported", http.StatusBadRequest, false, nil)
 	}
 	var maximum int64

@@ -13,7 +13,7 @@
     {
       "method": "POST",
       "path": "/v1/chat/completions",
-      "fields": {
+      "request_fields": {
         "model": "native",
         "messages": "translated",
         "stream": "native",
@@ -28,13 +28,16 @@
         "max_completion_tokens": "translated",
         "stop": "translated",
         "user": "translated",
-        "logprobs": "translated"
-      }
+        "seed": "translated",
+        "logprobs": "translated",
+        "top_logprobs": "translated"
+      },
+      "response_fields": {"id":"native","object":"native","created":"translated","model":"native","choices":"translated","usage":"translated"}
     },
     {
       "method": "POST",
       "path": "/v1/responses",
-      "fields": {
+      "request_fields": {
         "model": "native",
         "input": "translated",
         "instructions": "translated",
@@ -42,35 +45,39 @@
         "tools": "translated",
         "tool_choice": "translated",
         "text.format": "translated",
+        "max_output_tokens": "translated",
         "store": "rejected",
         "previous_response_id": "rejected"
-      }
+      },
+      "response_fields": {"id":"translated","object":"native","status":"translated","model":"native","output":"translated","usage":"translated"}
     },
     {
       "method": "POST",
       "path": "/v1/embeddings",
-      "fields": {
+      "request_fields": {
         "model": "native",
         "input": "translated",
         "dimensions": "translated",
         "encoding_format": "translated",
         "user": "translated"
-      }
+      },
+      "response_fields": {"object":"native","data":"translated","model":"native","usage":"translated"}
     },
     {
       "method": "POST",
       "path": "/v1/images/generations",
-      "fields": {
+      "request_fields": {
         "model": "native",
         "prompt": "translated",
         "n": "translated",
         "size": "translated",
         "quality": "translated",
         "response_format": "translated"
-      }
+      },
+      "response_fields": {"created":"translated","data":"translated"}
     },
-    {"method": "GET", "path": "/v1/models", "fields": {}},
-    {"method": "GET", "path": "/v1/models/{id}", "fields": {}}
+    {"method": "GET", "path": "/v1/models", "request_fields": {}, "response_fields": {"object":"native","data":"translated"}},
+    {"method": "GET", "path": "/v1/models/{id}", "request_fields": {}, "response_fields": {"id":"native","object":"native","created":"translated","owned_by":"translated","daptin":"native"}}
   ],
   "providers": [
     {"name": "openai-compatible", "operations": {"chat": "translated", "responses": "translated", "embeddings": "translated", "image_generation": "translated"}}
