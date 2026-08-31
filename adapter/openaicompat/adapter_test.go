@@ -63,6 +63,20 @@ func TestInvokeChatTranslatesCanonicalRequestAndResponse(t *testing.T) {
 	}
 }
 
+func TestHealthCheckUsesAuthenticatedModelsEndpoint(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/v1/models" || request.Header.Get("Authorization") != "Bearer secret-key" {
+			t.Fatalf("unexpected health request: %s %s headers=%v", request.Method, request.URL.Path, request.Header)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(response, `{"object":"list","data":[]}`)
+	}))
+	defer server.Close()
+	if err := buildAdapter(t, server, `{}`, Factory{}).HealthCheck(context.Background(), deployment()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("Content-Type", "application/json")

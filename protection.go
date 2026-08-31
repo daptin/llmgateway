@@ -18,10 +18,15 @@ type attemptLease struct {
 
 func (e *Engine) beforeAttempt(ctx context.Context, deployment catalog.Deployment, request contract.Request) (attemptLease, error) {
 	prefix := "llmgateway:deployment:" + string(deployment.ID) + ":"
-	if open, _, err := e.counters.Get(ctx, prefix+"cooldown"); err != nil {
+	if open, _, err := e.counters.Get(ctx, prefix+"rate_cooldown"); err != nil {
 		return attemptLease{}, transientCounterError(err)
 	} else if open > 0 {
-		return attemptLease{}, publicError(contract.ErrorUnavailable, "deployment is cooling down", 503, true, nil)
+		return attemptLease{}, publicError(contract.ErrorRateLimit, "deployment is rate limited", 429, true, nil)
+	}
+	if open, _, err := e.counters.Get(ctx, prefix+"circuit_cooldown"); err != nil {
+		return attemptLease{}, transientCounterError(err)
+	} else if open > 0 {
+		return attemptLease{}, publicError(contract.ErrorUnavailable, "deployment circuit is open", 503, true, nil)
 	}
 	lease := attemptLease{}
 	failures, _, err := e.counters.Get(ctx, prefix+"failures")
@@ -83,10 +88,18 @@ func (e *Engine) afterAttempt(ctx context.Context, deployment catalog.Deployment
 	defer cancel()
 	if result == nil {
 		_ = e.counters.Delete(settleCtx, prefix+"failures")
-		_ = e.counters.Delete(settleCtx, prefix+"cooldown")
+		_ = e.counters.Delete(settleCtx, prefix+"circuit_cooldown")
 		return
 	}
 	if !result.Retryable {
+		return
+	}
+	if result.Code == contract.ErrorRateLimit {
+		cooldown := e.circuitCooldown
+		if result.RetryAfter > cooldown {
+			cooldown = result.RetryAfter
+		}
+		_, _ = e.counters.Add(settleCtx, prefix+"rate_cooldown", 1, cooldown)
 		return
 	}
 	failures, err := e.counters.Add(settleCtx, prefix+"failures", 1, e.circuitWindow)
@@ -97,8 +110,8 @@ func (e *Engine) afterAttempt(ctx context.Context, deployment catalog.Deployment
 	if result.RetryAfter > cooldown {
 		cooldown = result.RetryAfter
 	}
-	if failures >= e.circuitFailures || result.Code == contract.ErrorRateLimit {
-		_, _ = e.counters.Add(settleCtx, prefix+"cooldown", 1, cooldown)
+	if failures >= e.circuitFailures {
+		_, _ = e.counters.Add(settleCtx, prefix+"circuit_cooldown", 1, cooldown)
 	}
 }
 

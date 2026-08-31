@@ -50,6 +50,8 @@ type Options struct {
 	FirstEventTimeout   time.Duration
 	StreamIdleTimeout   time.Duration
 	RequestTimeout      time.Duration
+	HealthProbeTimeout  time.Duration
+	HealthProbeWorkers  int
 }
 
 type runtimeSnapshot struct {
@@ -91,6 +93,8 @@ type Engine struct {
 	firstEventTimeout   time.Duration
 	streamIdleTimeout   time.Duration
 	requestTimeout      time.Duration
+	healthProbeTimeout  time.Duration
+	healthProbeWorkers  int
 	snapshot            atomic.Pointer[runtimeSnapshot]
 	draining            atomic.Bool
 	reloadMu            sync.Mutex
@@ -169,6 +173,15 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 	if options.RequestTimeout < time.Millisecond {
 		return nil, errors.New("request timeout must be positive")
 	}
+	if options.HealthProbeTimeout == 0 {
+		options.HealthProbeTimeout = 5 * time.Second
+	}
+	if options.HealthProbeWorkers == 0 {
+		options.HealthProbeWorkers = 8
+	}
+	if options.HealthProbeTimeout < time.Millisecond || options.HealthProbeWorkers < 1 || options.HealthProbeWorkers > 64 {
+		return nil, errors.New("health probe timeout and worker bounds are invalid")
+	}
 	dependencies.Adapters.Freeze()
 	dependencies.Guardrails.Freeze()
 	drained := make(chan struct{})
@@ -182,8 +195,9 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 		circuitFailures: options.CircuitFailures, circuitWindow: options.CircuitWindow, circuitCooldown: options.CircuitCooldown,
 		cacheTTL: options.CacheTTL, cacheTimeout: options.CacheTimeout, maxCacheEntryBytes: options.MaxCacheEntryBytes,
 		firstEventTimeout: options.FirstEventTimeout, streamIdleTimeout: options.StreamIdleTimeout,
-		requestTimeout: options.RequestTimeout,
-		drained:        drained,
+		requestTimeout:     options.RequestTimeout,
+		healthProbeTimeout: options.HealthProbeTimeout, healthProbeWorkers: options.HealthProbeWorkers,
+		drained: drained,
 	}, nil
 }
 
@@ -244,6 +258,16 @@ func (e *Engine) Reload(ctx context.Context) error {
 			return fmt.Errorf("provider %q adapter factory returned nil", provider.ID)
 		}
 		instances[provider.ID] = instance
+	}
+	for _, deployment := range compiled.Deployments() {
+		if !deployment.Enabled || !deployment.HealthCheck {
+			continue
+		}
+		instance := instances[deployment.ProviderID]
+		if _, ok := instance.(adapter.HealthChecker); !ok {
+			e.recordReloadFailure(document.Revision, "health_check")
+			return fmt.Errorf("deployment %q enables health checks on an adapter without probe support", deployment.ID)
+		}
 	}
 	compiledGuardrails := make(map[contract.ID][]runtimeGuardrail)
 	for _, model := range compiled.Models() {

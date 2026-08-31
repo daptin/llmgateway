@@ -216,6 +216,19 @@ func (s *Snapshot) DeploymentsForModel(id contract.ID) []Deployment {
 	return result
 }
 
+func (s *Snapshot) Deployments() []Deployment {
+	ids := make([]contract.ID, 0, len(s.deployments))
+	for id := range s.deployments {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	result := make([]Deployment, 0, len(ids))
+	for _, id := range ids {
+		result = append(result, cloneDeployment(s.deployments[id]))
+	}
+	return result
+}
+
 func validateProvider(provider Provider) error {
 	if provider.ID == "" || strings.TrimSpace(provider.Name) == "" || strings.TrimSpace(provider.Type) == "" {
 		return errors.New("provider id, name, and type are required")

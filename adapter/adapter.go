@@ -48,6 +48,12 @@ type Adapter interface {
 	Stream(context.Context, catalog.Deployment, contract.Request) (Stream, error)
 }
 
+// HealthChecker is implemented only by adapters with a side-effect-free
+// provider health operation. Deployments cannot enable probes otherwise.
+type HealthChecker interface {
+	HealthCheck(context.Context, catalog.Deployment) error
+}
+
 type Factory interface {
 	Build(context.Context, catalog.Provider, Secret) (Adapter, error)
 }

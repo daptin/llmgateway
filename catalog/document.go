@@ -57,6 +57,7 @@ type Deployment struct {
 	TPM            int64
 	Pricing        Pricing
 	Parameters     json.RawMessage
+	HealthCheck    bool
 	Enabled        bool
 }
 

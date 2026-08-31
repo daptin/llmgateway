@@ -150,6 +150,26 @@ func (a *Adapter) Stream(ctx context.Context, deployment catalog.Deployment, req
 	return newEventStream(response.Body, request.Operation, a.maxEventBytes), nil
 }
 
+func (a *Adapter) HealthCheck(ctx context.Context, deployment catalog.Deployment) error {
+	endpoint := *a.baseURL
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/models"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return providerFailure("failed to construct upstream health probe", err)
+	}
+	a.setHeaders(request, "application/json")
+	response, err := a.clientFor(deployment.ConnectTimeout).Do(request)
+	if err != nil {
+		return providerFailure("upstream health probe failed", err)
+	}
+	defer response.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 64<<10))
+	if response.StatusCode < 200 || response.StatusCode >= 300 {
+		return providerFailure("upstream health probe returned an unsuccessful status", nil)
+	}
+	return nil
+}
+
 func (a *Adapter) do(ctx context.Context, deployment catalog.Deployment, path string, body []byte) (*http.Response, error) {
 	if len(bytes.TrimSpace(deployment.Parameters)) > 0 && !bytes.Equal(bytes.TrimSpace(deployment.Parameters), []byte("{}")) {
 		return nil, invalidRequest("OpenAI-compatible deployment parameters are not supported", nil)
@@ -169,15 +189,8 @@ func (a *Adapter) do(ctx context.Context, deployment catalog.Deployment, path st
 		cancel()
 		return nil, invalidRequest("failed to construct upstream request", err)
 	}
-	request.Header.Set("Authorization", "Bearer "+string(a.apiKey))
+	a.setHeaders(request, "application/json")
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Accept", "application/json")
-	if a.parameters.Organization != "" {
-		request.Header.Set("OpenAI-Organization", a.parameters.Organization)
-	}
-	if a.parameters.Project != "" {
-		request.Header.Set("OpenAI-Project", a.parameters.Project)
-	}
 	response, err := a.clientFor(deployment.ConnectTimeout).Do(request)
 	if err != nil {
 		cancel()
@@ -191,6 +204,17 @@ func (a *Adapter) do(ctx context.Context, deployment catalog.Deployment, path st
 	}
 	response.Body = &cancelReadCloser{ReadCloser: response.Body, cancel: cancel}
 	return response, nil
+}
+
+func (a *Adapter) setHeaders(request *http.Request, accept string) {
+	request.Header.Set("Authorization", "Bearer "+string(a.apiKey))
+	request.Header.Set("Accept", accept)
+	if a.parameters.Organization != "" {
+		request.Header.Set("OpenAI-Organization", a.parameters.Organization)
+	}
+	if a.parameters.Project != "" {
+		request.Header.Set("OpenAI-Project", a.parameters.Project)
+	}
 }
 
 type cancelReadCloser struct {
