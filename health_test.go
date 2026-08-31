@@ -3,6 +3,7 @@ package llmgateway_test
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,15 +17,23 @@ import (
 
 type healthAdapter struct {
 	*testkit.FaultAdapter
-	healthErr error
+	healthErr   error
+	healthCalls atomic.Int64
 }
 
-func (a *healthAdapter) HealthCheck(context.Context, catalog.Deployment) error { return a.healthErr }
+func (a *healthAdapter) HealthCheck(context.Context, catalog.Deployment) error {
+	a.healthCalls.Add(1)
+	return a.healthErr
+}
 
-func healthEngine(t *testing.T, provider adapter.Adapter, counters llmgateway.CounterStore, options llmgateway.Options) *llmgateway.Engine {
+func healthEngine(t *testing.T, provider adapter.Adapter, counters llmgateway.CounterStore, options llmgateway.Options, checks ...catalog.HealthCheck) *llmgateway.Engine {
 	t.Helper()
 	document := testDocument()
-	document.Deployments[0].HealthCheck = true
+	check := catalog.HealthCheck{Enabled: true}
+	if len(checks) == 1 {
+		check = checks[0]
+	}
+	document.Deployments[0].HealthCheck = check
 	registry := adapter.NewRegistry()
 	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) {
 		return provider, nil
@@ -78,7 +87,7 @@ func TestSuccessfulProbeDoesNotEraseRateLimitCooldown(t *testing.T) {
 func TestFailedProbeOpensInfrastructureCircuit(t *testing.T) {
 	fault := testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})
 	provider := &healthAdapter{FaultAdapter: fault, healthErr: errors.New("unreachable")}
-	engine := healthEngine(t, provider, testkit.NewCounterStore(time.Now), llmgateway.Options{CircuitFailures: 1})
+	engine := healthEngine(t, provider, testkit.NewCounterStore(time.Now), llmgateway.Options{}, catalog.HealthCheck{Enabled: true, FailureThreshold: 1})
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -90,5 +99,40 @@ func TestFailedProbeOpensInfrastructureCircuit(t *testing.T) {
 	var gatewayError *contract.Error
 	if !errors.As(err, &gatewayError) || gatewayError.Code != contract.ErrorUnavailable {
 		t.Fatalf("failed probe did not open circuit: %v", err)
+	}
+}
+
+func TestProbeHonorsPerDeploymentInterval(t *testing.T) {
+	document := testDocument()
+	document.Deployments[0].HealthCheck = catalog.HealthCheck{Enabled: true, Interval: time.Minute}
+	provider := &healthAdapter{FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})}
+	registry := adapter.NewRegistry()
+	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) { return provider, nil })); err != nil {
+		t.Fatal(err)
+	}
+	clock := testkit.NewClock(time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC))
+	engine, err := llmgateway.New(llmgateway.Dependencies{
+		Catalog: testkit.NewCatalogSource(document), Adapters: registry, Authorizer: testkit.AllowAuthorizer{},
+		Accounting: testkit.NewAccountingStore(), Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
+		Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
+	}, llmgateway.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	first, err := engine.Probe(context.Background())
+	if err != nil || first.Checked != 1 {
+		t.Fatalf("first probe=%+v err=%v", first, err)
+	}
+	second, err := engine.Probe(context.Background())
+	if err != nil || second.Checked != 0 {
+		t.Fatalf("early probe=%+v err=%v", second, err)
+	}
+	clock.Advance(time.Minute)
+	third, err := engine.Probe(context.Background())
+	if err != nil || third.Checked != 1 || provider.healthCalls.Load() != 2 {
+		t.Fatalf("due probe=%+v calls=%d err=%v", third, provider.healthCalls.Load(), err)
 	}
 }

@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"testing"
+	"time"
 
 	"github.com/daptin/llmgateway/contract"
 )
@@ -12,6 +13,23 @@ func validDocument() Document {
 		Providers:   []Provider{{ID: "provider-1", Name: "primary", Type: "openai", Enabled: true}},
 		Models:      []Model{{ID: "model-1", Name: "public-model", Operations: []contract.Operation{contract.OperationChat}, RoutingStrategy: "priority_weighted", UnsupportedParameterPolicy: "reject", Enabled: true}},
 		Deployments: []Deployment{{ID: "deployment-1", Name: "primary", ModelID: "model-1", ProviderID: "provider-1", UpstreamModel: "upstream-model", Operations: []contract.Operation{contract.OperationChat}, Weight: 1, MaxConcurrency: -1, RPM: -1, TPM: -1, Enabled: true}},
+	}
+}
+
+func TestCompileNormalizesAndValidatesHealthChecks(t *testing.T) {
+	document := validDocument()
+	document.Deployments[0].HealthCheck = HealthCheck{Enabled: true}
+	snapshot, err := Compile(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := snapshot.Deployments()[0].HealthCheck
+	if !check.Enabled || check.Interval != 30*time.Second || check.Timeout != 5*time.Second || check.FailureThreshold != 3 {
+		t.Fatalf("health check defaults = %+v", check)
+	}
+	document.Deployments[0].HealthCheck = HealthCheck{Enabled: true, Interval: time.Second, Timeout: 2 * time.Second, FailureThreshold: 1}
+	if _, err := Compile(document); err == nil {
+		t.Fatal("accepted a health timeout longer than its interval")
 	}
 }
 

@@ -89,6 +89,17 @@ func Compile(doc Document) (*Snapshot, error) {
 		if deployment.ConnectTimeout == 0 {
 			deployment.ConnectTimeout = 5 * time.Second
 		}
+		if deployment.HealthCheck.Enabled {
+			if deployment.HealthCheck.Interval == 0 {
+				deployment.HealthCheck.Interval = 30 * time.Second
+			}
+			if deployment.HealthCheck.Timeout == 0 {
+				deployment.HealthCheck.Timeout = 5 * time.Second
+			}
+			if deployment.HealthCheck.FailureThreshold == 0 {
+				deployment.HealthCheck.FailureThreshold = 3
+			}
+		}
 		if err := validateDeployment(deployment, s.models, s.providers); err != nil {
 			return nil, err
 		}
@@ -323,6 +334,10 @@ func validateDeployment(deployment Deployment, models map[contract.ID]Model, pro
 	}
 	if deployment.RequestTimeout < time.Millisecond || deployment.ConnectTimeout < time.Millisecond || deployment.ConnectTimeout > deployment.RequestTimeout {
 		return fmt.Errorf("deployment %q timeouts must be positive and connect cannot exceed request", deployment.ID)
+	}
+	if deployment.HealthCheck.Enabled && (deployment.HealthCheck.Interval < time.Second || deployment.HealthCheck.Timeout < time.Millisecond ||
+		deployment.HealthCheck.Timeout > deployment.HealthCheck.Interval || deployment.HealthCheck.FailureThreshold < 1) {
+		return fmt.Errorf("deployment %q health check interval, timeout, and failure threshold are invalid", deployment.ID)
 	}
 	allowed := make(map[contract.Operation]struct{}, len(model.Operations))
 	for _, operation := range model.Operations {

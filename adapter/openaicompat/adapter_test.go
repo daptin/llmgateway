@@ -79,6 +79,29 @@ func TestHealthCheckUsesAuthenticatedModelsEndpoint(t *testing.T) {
 	}
 }
 
+func TestHealthCheckUsesValidatedDeploymentPathAndModel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/v1/health/probe-model" {
+			t.Fatalf("unexpected health request: %s %s", request.Method, request.URL.Path)
+		}
+		response.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	built := buildAdapter(t, server, `{}`, Factory{})
+	configured := deployment()
+	configured.HealthCheck = catalog.HealthCheck{Enabled: true, Path: "/health/{model}", Model: "probe-model"}
+	if err := built.ValidateDeployment(configured); err != nil {
+		t.Fatal(err)
+	}
+	if err := built.HealthCheck(context.Background(), configured); err != nil {
+		t.Fatal(err)
+	}
+	configured.HealthCheck.Path = "https://attacker.example/health"
+	if err := built.ValidateDeployment(configured); err == nil {
+		t.Fatal("accepted an absolute health-check URL")
+	}
+}
+
 func TestBuildRequiresExplicitPrivateNetworkOptIn(t *testing.T) {
 	provider := catalog.Provider{ID: "p", Name: "provider", Type: "openai-compatible", BaseURL: "https://127.0.0.1/v1", Enabled: true}
 	if _, err := (Factory{}).Build(context.Background(), provider, baseadapter.NewSecret([]byte("secret"))); err == nil || !strings.Contains(err.Error(), "private-network") {

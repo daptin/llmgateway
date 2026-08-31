@@ -122,6 +122,15 @@ func (a *Adapter) ValidateDeployment(deployment catalog.Deployment) error {
 	if len(bytes.TrimSpace(deployment.Parameters)) > 0 && !bytes.Equal(bytes.TrimSpace(deployment.Parameters), []byte("{}")) {
 		return errors.New("OpenAI-compatible deployment parameters are not supported")
 	}
+	if deployment.HealthCheck.Path != "" {
+		parsed, err := url.Parse(deployment.HealthCheck.Path)
+		if err != nil || !strings.HasPrefix(parsed.Path, "/") || parsed.IsAbs() || parsed.Host != "" || parsed.RawQuery != "" || parsed.Fragment != "" || strings.Contains(parsed.Path, "..") {
+			return errors.New("health check path must be an absolute URL path without traversal, query, or fragment")
+		}
+	}
+	if strings.Contains(deployment.HealthCheck.Path, "{model}") && strings.TrimSpace(deployment.HealthCheck.Model) == "" {
+		return errors.New("health check path uses {model} without a health check model")
+	}
 	return nil
 }
 
@@ -173,7 +182,16 @@ func (a *Adapter) Stream(ctx context.Context, deployment catalog.Deployment, req
 
 func (a *Adapter) HealthCheck(ctx context.Context, deployment catalog.Deployment) error {
 	endpoint := *a.baseURL
-	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + "/models"
+	path := deployment.HealthCheck.Path
+	if path == "" {
+		path = "/models"
+		if deployment.HealthCheck.Model != "" {
+			path += "/" + url.PathEscape(deployment.HealthCheck.Model)
+		}
+	} else if deployment.HealthCheck.Model != "" {
+		path = strings.ReplaceAll(path, "{model}", url.PathEscape(deployment.HealthCheck.Model))
+	}
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return providerFailure("failed to construct upstream health probe", err)

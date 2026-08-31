@@ -51,7 +51,6 @@ type Options struct {
 	FirstEventTimeout      time.Duration
 	StreamIdleTimeout      time.Duration
 	RequestTimeout         time.Duration
-	HealthProbeTimeout     time.Duration
 	HealthProbeWorkers     int
 }
 
@@ -95,8 +94,10 @@ type Engine struct {
 	firstEventTimeout      time.Duration
 	streamIdleTimeout      time.Duration
 	requestTimeout         time.Duration
-	healthProbeTimeout     time.Duration
 	healthProbeWorkers     int
+	healthMu               sync.Mutex
+	healthLast             map[contract.ID]time.Time
+	healthActive           map[contract.ID]bool
 	snapshot               atomic.Pointer[runtimeSnapshot]
 	draining               atomic.Bool
 	reloadMu               sync.Mutex
@@ -181,14 +182,11 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 	if options.RequestTimeout < time.Millisecond {
 		return nil, errors.New("request timeout must be positive")
 	}
-	if options.HealthProbeTimeout == 0 {
-		options.HealthProbeTimeout = 5 * time.Second
-	}
 	if options.HealthProbeWorkers == 0 {
 		options.HealthProbeWorkers = 8
 	}
-	if options.HealthProbeTimeout < time.Millisecond || options.HealthProbeWorkers < 1 || options.HealthProbeWorkers > 64 {
-		return nil, errors.New("health probe timeout and worker bounds are invalid")
+	if options.HealthProbeWorkers < 1 || options.HealthProbeWorkers > 64 {
+		return nil, errors.New("health probe worker bounds are invalid")
 	}
 	dependencies.Adapters.Freeze()
 	dependencies.Guardrails.Freeze()
@@ -204,7 +202,7 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 		cacheTTL: options.CacheTTL, cacheTimeout: options.CacheTimeout, maxCacheEntryBytes: options.MaxCacheEntryBytes,
 		firstEventTimeout: options.FirstEventTimeout, streamIdleTimeout: options.StreamIdleTimeout,
 		requestTimeout:     options.RequestTimeout,
-		healthProbeTimeout: options.HealthProbeTimeout, healthProbeWorkers: options.HealthProbeWorkers,
+		healthProbeWorkers: options.HealthProbeWorkers, healthLast: make(map[contract.ID]time.Time), healthActive: make(map[contract.ID]bool),
 		drained: drained,
 	}, nil
 }
@@ -278,7 +276,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 				return fmt.Errorf("validate deployment %q: %w", deployment.ID, validateErr)
 			}
 		}
-		if deployment.HealthCheck {
+		if deployment.HealthCheck.Enabled {
 			if _, ok := instance.(adapter.HealthChecker); ok {
 				continue
 			}
@@ -312,6 +310,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 		return catalog.ErrStaleRevision
 	}
 	e.snapshot.Store(next)
+	e.pruneHealthState(compiled)
 	e.statusMu.Lock()
 	e.rejectedRevision = 0
 	e.reloadFailureStage = ""
