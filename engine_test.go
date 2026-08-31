@@ -72,6 +72,12 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	if err := engine.Reload(context.Background()); !errors.Is(err, catalog.ErrStaleRevision) {
+		t.Fatalf("expected unchanged catalog result, got %v", err)
+	}
+	if status := engine.Status(); status.Degraded {
+		t.Fatalf("unchanged catalog degraded readiness: %+v", status)
+	}
 	assertReadyStatus(t, handler, http.StatusOK)
 	request := chatRequest("request", false)
 	request.EstimatedUsage = contract.Usage{InputTokens: 2, OutputTokens: 8, TotalTokens: 10}

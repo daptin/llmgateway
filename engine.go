@@ -176,7 +176,9 @@ func (e *Engine) Reload(ctx context.Context) error {
 	}
 	document, err := e.catalog.Load(ctx, after)
 	if err != nil {
-		e.recordReloadFailure(0, "load")
+		if !errors.Is(err, catalog.ErrStaleRevision) {
+			e.recordReloadFailure(0, "load")
+		}
 		return err
 	}
 	compiled, err := catalog.Compile(document)
@@ -243,7 +245,6 @@ func (e *Engine) Reload(ctx context.Context) error {
 	next := &runtimeSnapshot{catalog: compiled, adapters: instances, guardrails: compiledGuardrails}
 	current := e.snapshot.Load()
 	if current != nil && next.catalog.Revision() <= current.catalog.Revision() {
-		e.recordReloadFailure(document.Revision, "stale")
 		return catalog.ErrStaleRevision
 	}
 	e.snapshot.Store(next)
