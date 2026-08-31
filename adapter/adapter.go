@@ -54,6 +54,13 @@ type HealthChecker interface {
 	HealthCheck(context.Context, catalog.Deployment) error
 }
 
+// DeploymentValidator lets an adapter reject adapter-specific deployment
+// configuration while a complete snapshot is being built. The same adapter
+// remains responsible for defensive validation when invoked directly.
+type DeploymentValidator interface {
+	ValidateDeployment(catalog.Deployment) error
+}
+
 type Factory interface {
 	Build(context.Context, catalog.Provider, Secret) (Adapter, error)
 }

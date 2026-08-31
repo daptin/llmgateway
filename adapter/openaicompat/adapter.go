@@ -112,7 +112,17 @@ func (a *Adapter) Capabilities() adapter.Capabilities {
 	return adapter.Capabilities{Operations: map[contract.Operation]bool{
 		contract.OperationChat: true, contract.OperationResponses: true,
 		contract.OperationEmbeddings: true, contract.OperationImageGeneration: true,
-	}, Features: map[string]bool{"streaming": true, "tools": true, "vision": true, "json_schema": true}}
+	}, Features: map[string]bool{
+		"audio": true, "dimensions": true, "json_schema": true, "logprobs": true,
+		"streaming": true, "token_ids": true, "tools": true, "vision": true,
+	}}
+}
+
+func (a *Adapter) ValidateDeployment(deployment catalog.Deployment) error {
+	if len(bytes.TrimSpace(deployment.Parameters)) > 0 && !bytes.Equal(bytes.TrimSpace(deployment.Parameters), []byte("{}")) {
+		return errors.New("OpenAI-compatible deployment parameters are not supported")
+	}
+	return nil
 }
 
 func (a *Adapter) Invoke(ctx context.Context, deployment catalog.Deployment, request contract.Request) (contract.Response, error) {
@@ -182,8 +192,8 @@ func (a *Adapter) HealthCheck(ctx context.Context, deployment catalog.Deployment
 }
 
 func (a *Adapter) do(ctx context.Context, deployment catalog.Deployment, path string, body []byte) (*http.Response, error) {
-	if len(bytes.TrimSpace(deployment.Parameters)) > 0 && !bytes.Equal(bytes.TrimSpace(deployment.Parameters), []byte("{}")) {
-		return nil, invalidRequest("OpenAI-compatible deployment parameters are not supported", nil)
+	if err := a.ValidateDeployment(deployment); err != nil {
+		return nil, invalidRequest(err.Error(), err)
 	}
 	if path == "/images/generations" && a.parameters.ImageGenerationPath != "" {
 		path = a.parameters.ImageGenerationPath

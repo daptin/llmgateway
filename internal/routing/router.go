@@ -31,7 +31,7 @@ type Plan struct {
 	Attempts       []Attempt
 }
 
-func Build(snapshot *catalog.Snapshot, publicModel string, operation contract.Operation, capabilities CapabilitySource, selector Selector) (Plan, error) {
+func Build(snapshot *catalog.Snapshot, publicModel string, operation contract.Operation, requiredFeatures []string, capabilities CapabilitySource, selector Selector) (Plan, error) {
 	if snapshot == nil || capabilities == nil || selector == nil {
 		return Plan{}, errors.New("snapshot, capabilities, and selector are required")
 	}
@@ -53,7 +53,7 @@ func Build(snapshot *catalog.Snapshot, publicModel string, operation contract.Op
 			return nil
 		}
 		visited[model.ID] = true
-		plan.Attempts = append(plan.Attempts, attemptsForModel(snapshot, model, operation, capabilities, selector)...)
+		plan.Attempts = append(plan.Attempts, attemptsForModel(snapshot, model, operation, requiredFeatures, capabilities, selector)...)
 		for _, fallbackID := range model.FallbackModelIDs {
 			fallback, exists := snapshot.Model(fallbackID)
 			if !exists {
@@ -76,7 +76,7 @@ func Build(snapshot *catalog.Snapshot, publicModel string, operation contract.Op
 	return plan, nil
 }
 
-func attemptsForModel(snapshot *catalog.Snapshot, model catalog.Model, operation contract.Operation, capabilities CapabilitySource, selector Selector) []Attempt {
+func attemptsForModel(snapshot *catalog.Snapshot, model catalog.Model, operation contract.Operation, requiredFeatures []string, capabilities CapabilitySource, selector Selector) []Attempt {
 	// Catalog compilation rejects every other strategy. Keeping the dispatch
 	// here makes routing_strategy an executable contract instead of inert data.
 	if model.RoutingStrategy != "priority_weighted" {
@@ -93,7 +93,7 @@ func attemptsForModel(snapshot *catalog.Snapshot, model catalog.Model, operation
 			continue
 		}
 		providerCapabilities, ok := capabilities.Capabilities(provider.ID)
-		if !ok || !providerCapabilities.Supports(operation) {
+		if !ok || !providerCapabilities.Supports(operation) || !supportsFeatures(providerCapabilities, requiredFeatures) {
 			continue
 		}
 		if _, exists := tiers[deployment.Priority]; !exists {
@@ -107,6 +107,15 @@ func attemptsForModel(snapshot *catalog.Snapshot, model catalog.Model, operation
 		ordered = append(ordered, weightedPermutation(tiers[priority], selector)...)
 	}
 	return ordered
+}
+
+func supportsFeatures(capabilities adapter.Capabilities, required []string) bool {
+	for _, feature := range required {
+		if !capabilities.Features[feature] {
+			return false
+		}
+	}
+	return true
 }
 
 func weightedPermutation(candidates []Attempt, selector Selector) []Attempt {

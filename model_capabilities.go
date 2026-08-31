@@ -2,68 +2,71 @@ package llmgateway
 
 import (
 	"fmt"
+	"sort"
 
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
 )
 
 func validateModelCapabilities(model catalog.Model, request contract.Request) error {
-	require := func(capability string) error {
-		if model.Capabilities[capability] {
-			return nil
+	for _, capability := range requiredAdapterFeatures(request) {
+		if capability == "streaming" {
+			continue
 		}
-		return fmt.Errorf("model %q does not enable %s", model.Name, capability)
+		if !model.Capabilities[capability] {
+			return fmt.Errorf("model %q does not enable %s", model.Name, capability)
+		}
+	}
+	return nil
+}
+
+func requiredAdapterFeatures(request contract.Request) []string {
+	features := make(map[string]struct{})
+	add := func(feature string) { features[feature] = struct{}{} }
+	if request.Stream {
+		add("streaming")
 	}
 	switch request.Operation {
 	case contract.OperationChat:
 		if len(request.Chat.Tools) != 0 || request.Chat.ToolChoice != nil || messagesUseTools(request.Chat.Messages) {
-			if err := require("tools"); err != nil {
-				return err
-			}
+			add("tools")
 		}
 		if messagesUsePart(request.Chat.Messages, "image_url") {
-			if err := require("vision"); err != nil {
-				return err
-			}
+			add("vision")
 		}
 		if messagesUsePart(request.Chat.Messages, "input_audio") {
-			if err := require("audio"); err != nil {
-				return err
-			}
+			add("audio")
 		}
 		if request.Chat.ResponseFormat != nil && request.Chat.ResponseFormat.Type == "json_schema" {
-			if err := require("json_schema"); err != nil {
-				return err
-			}
+			add("json_schema")
 		}
 		if request.Chat.Logprobs {
-			return require("logprobs")
+			add("logprobs")
 		}
 	case contract.OperationResponses:
 		if len(request.Responses.Tools) != 0 || request.Responses.ToolChoice != nil || responsesUseTools(request.Responses.Input) {
-			if err := require("tools"); err != nil {
-				return err
-			}
+			add("tools")
 		}
 		if responsesUsePart(request.Responses.Input, "input_image") {
-			if err := require("vision"); err != nil {
-				return err
-			}
+			add("vision")
 		}
 		if request.Responses.TextFormat != nil && request.Responses.TextFormat.Type == "json_schema" {
-			return require("json_schema")
+			add("json_schema")
 		}
 	case contract.OperationEmbeddings:
 		if len(request.Embeddings.Input.Tokens) != 0 {
-			if err := require("token_ids"); err != nil {
-				return err
-			}
+			add("token_ids")
 		}
 		if request.Embeddings.Dimensions != 0 {
-			return require("dimensions")
+			add("dimensions")
 		}
 	}
-	return nil
+	result := make([]string, 0, len(features))
+	for feature := range features {
+		result = append(result, feature)
+	}
+	sort.Strings(result)
+	return result
 }
 
 func messagesUseTools(messages []contract.Message) bool {

@@ -260,11 +260,20 @@ func (e *Engine) Reload(ctx context.Context) error {
 		instances[provider.ID] = instance
 	}
 	for _, deployment := range compiled.Deployments() {
-		if !deployment.Enabled || !deployment.HealthCheck {
+		if !deployment.Enabled {
 			continue
 		}
 		instance := instances[deployment.ProviderID]
-		if _, ok := instance.(adapter.HealthChecker); !ok {
+		if validator, ok := instance.(adapter.DeploymentValidator); ok {
+			if validateErr := validator.ValidateDeployment(deployment); validateErr != nil {
+				e.recordReloadFailure(document.Revision, "deployment_config")
+				return fmt.Errorf("validate deployment %q: %w", deployment.ID, validateErr)
+			}
+		}
+		if deployment.HealthCheck {
+			if _, ok := instance.(adapter.HealthChecker); ok {
+				continue
+			}
 			e.recordReloadFailure(document.Revision, "health_check")
 			return fmt.Errorf("deployment %q enables health checks on an adapter without probe support", deployment.ID)
 		}
@@ -543,7 +552,7 @@ func (e *Engine) resolve(ctx context.Context, principal contract.Principal, requ
 }
 
 func (e *Engine) admit(ctx context.Context, principal contract.Principal, prepared preparedRequest) (preparedRequest, error) {
-	plan, err := routing.Build(prepared.runtime.catalog, prepared.request.PublicModel, prepared.request.Operation, prepared.runtime, e.selector)
+	plan, err := routing.Build(prepared.runtime.catalog, prepared.request.PublicModel, prepared.request.Operation, requiredAdapterFeatures(prepared.request), prepared.runtime, e.selector)
 	if err != nil {
 		return preparedRequest{}, publicError(contract.ErrorUnavailable, "no healthy deployment", 503, true, err)
 	}

@@ -42,7 +42,11 @@ func streamEngine(t *testing.T, document catalog.Document, provider adapter.Adap
 type waitingAdapter struct{ first bool }
 
 func (waitingAdapter) Capabilities() adapter.Capabilities {
-	return adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}}
+	return streamCapabilities()
+}
+
+func streamCapabilities() adapter.Capabilities {
+	return adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}, Features: map[string]bool{"streaming": true}}
 }
 func (waitingAdapter) Invoke(context.Context, catalog.Deployment, contract.Request) (contract.Response, error) {
 	return contract.Response{}, errors.New("not implemented")
@@ -67,7 +71,7 @@ func TestStreamRetriesBeforeFirstEvent(t *testing.T) {
 	document := testDocument()
 	document.Deployments = append(document.Deployments, catalog.Deployment{ID: "d2", Name: "second", ProviderID: "p", ModelID: "m", UpstreamModel: "other", Operations: []contract.Operation{contract.OperationChat}, Weight: 1, MaxConcurrency: -1, RPM: -1, TPM: -1, Enabled: true})
 	fault := testkit.NewFaultAdapter(
-		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		streamCapabilities(),
 		testkit.AdapterStep{TerminalError: &contract.Error{Code: contract.ErrorRateLimit, Message: "limited", HTTPStatus: 429, Retryable: true}},
 		testkit.AdapterStep{Events: []contract.StreamEvent{{Type: "content_delta", Chat: &contract.ChatDelta{Content: "ok"}}, {Type: "finish", Usage: &contract.Usage{TotalTokens: 1}, Terminal: true}}},
 	)
@@ -140,7 +144,7 @@ func TestStreamIdleTimeoutTerminatesAfterCommit(t *testing.T) {
 
 func TestStreamNeverRetriesAfterFirstEvent(t *testing.T) {
 	fault := testkit.NewFaultAdapter(
-		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		streamCapabilities(),
 		testkit.AdapterStep{Events: []contract.StreamEvent{{Type: "content_delta", Chat: &contract.ChatDelta{Content: "partial"}}}, TerminalError: &contract.Error{Code: contract.ErrorProvider, Message: "reset", HTTPStatus: 502, Retryable: true}},
 	)
 	store := testkit.NewAccountingStore()
@@ -166,7 +170,7 @@ func TestStreamNeverRetriesAfterFirstEvent(t *testing.T) {
 
 func TestStreamCloseCancelsAccounting(t *testing.T) {
 	fault := testkit.NewFaultAdapter(
-		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		streamCapabilities(),
 		testkit.AdapterStep{Events: []contract.StreamEvent{{Type: "content_delta", Chat: &contract.ChatDelta{Content: "partial"}}}},
 	)
 	store := testkit.NewAccountingStore()
@@ -184,7 +188,7 @@ func TestStreamCloseCancelsAccounting(t *testing.T) {
 
 func TestStreamConservativelySettlesMissingProviderUsage(t *testing.T) {
 	fault := testkit.NewFaultAdapter(
-		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		streamCapabilities(),
 		testkit.AdapterStep{Events: []contract.StreamEvent{
 			{Type: "content_delta", Chat: &contract.ChatDelta{Content: "complete"}},
 			{Type: "finish", Terminal: true},

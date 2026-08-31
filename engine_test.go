@@ -62,6 +62,13 @@ type captureTelemetry struct {
 	events []llmgateway.TelemetryEvent
 }
 
+type deploymentValidatingAdapter struct {
+	*testkit.FaultAdapter
+	err error
+}
+
+func (a deploymentValidatingAdapter) ValidateDeployment(catalog.Deployment) error { return a.err }
+
 func (s *captureTelemetry) Record(_ context.Context, event llmgateway.TelemetryEvent) {
 	s.mu.Lock()
 	s.events = append(s.events, event)
@@ -117,6 +124,34 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 		t.Fatalf("expected ErrDraining, got %v", err)
 	}
 	assertReadyStatus(t, handler, http.StatusServiceUnavailable)
+}
+
+func TestReloadRejectsInvalidAdapterDeploymentConfiguration(t *testing.T) {
+	provider := deploymentValidatingAdapter{
+		FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}}),
+		err:          errors.New("invalid adapter deployment configuration"),
+	}
+	registry := adapter.NewRegistry()
+	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) {
+		return provider, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	clock := testkit.NewAutoClock(time.Now())
+	engine, err := llmgateway.New(llmgateway.Dependencies{
+		Catalog: testkit.NewCatalogSource(testDocument()), Adapters: registry, Authorizer: testkit.AllowAuthorizer{},
+		Accounting: testkit.NewAccountingStore(), Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
+		Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
+	}, llmgateway.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Reload(context.Background()); err == nil {
+		t.Fatal("expected deployment configuration rejection")
+	}
+	if status := engine.Status(); status.Ready || status.ReloadStage != "deployment_config" {
+		t.Fatalf("status = %+v", status)
+	}
 }
 
 func TestInvokeConservativelySettlesMissingProviderUsage(t *testing.T) {
@@ -296,7 +331,7 @@ func TestEngineDoesNotRetryNonRetryableFailure(t *testing.T) {
 
 func TestDrainWaitsForAdmittedStreamAndRejectsNewWork(t *testing.T) {
 	faultAdapter := testkit.NewFaultAdapter(
-		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}, Features: map[string]bool{"streaming": true}},
 		testkit.AdapterStep{Events: []contract.StreamEvent{{Chat: &contract.ChatDelta{ID: "chunk"}}}},
 	)
 	store := testkit.NewAccountingStore()

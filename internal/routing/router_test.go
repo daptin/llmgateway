@@ -49,7 +49,7 @@ func TestBuildUsesWeightWithoutReplacementThenFallback(t *testing.T) {
 		"p2": {Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		"p3": {Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 	}
-	plan, err := routing.Build(routingSnapshot(t), "public", contract.OperationChat, capabilities, testkit.NewSelector(2, 0, 0))
+	plan, err := routing.Build(routingSnapshot(t), "public", contract.OperationChat, nil, capabilities, testkit.NewSelector(2, 0, 0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +69,7 @@ func TestBuildFiltersProviderWithoutCapability(t *testing.T) {
 		"p1": {Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		"p3": {Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 	}
-	plan, err := routing.Build(routingSnapshot(t), "public", contract.OperationChat, capabilities, testkit.NewSelector(0))
+	plan, err := routing.Build(routingSnapshot(t), "public", contract.OperationChat, nil, capabilities, testkit.NewSelector(0))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,8 +79,25 @@ func TestBuildFiltersProviderWithoutCapability(t *testing.T) {
 }
 
 func TestBuildRejectsUnknownModel(t *testing.T) {
-	_, err := routing.Build(routingSnapshot(t), "missing", contract.OperationChat, capabilityMap{}, testkit.NewSelector(0))
+	_, err := routing.Build(routingSnapshot(t), "missing", contract.OperationChat, nil, capabilityMap{}, testkit.NewSelector(0))
 	if err == nil {
 		t.Fatal("expected missing model error")
+	}
+}
+
+func TestBuildFiltersAdaptersMissingRequiredFeatures(t *testing.T) {
+	capabilities := capabilityMap{
+		"p1": {Operations: map[contract.Operation]bool{contract.OperationChat: true}, Features: map[string]bool{"tools": true}},
+		"p2": {Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		"p3": {Operations: map[contract.Operation]bool{contract.OperationChat: true}, Features: map[string]bool{"tools": true}},
+	}
+	plan, err := routing.Build(routingSnapshot(t), "public", contract.OperationChat, []string{"tools"}, capabilities, testkit.NewSelector(0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, attempt := range plan.Attempts {
+		if attempt.Provider.ID == "p2" {
+			t.Fatalf("adapter without tools remained eligible: %+v", plan.Attempts)
+		}
 	}
 }
