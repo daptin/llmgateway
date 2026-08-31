@@ -31,10 +31,11 @@ so fields with similar names cannot collide:
 ```
 
 Unknown, invalid, or undeclared-operation defaults reject the whole snapshot.
-Explicit request values always take precedence. Only the
-`priority_weighted` routing strategy and `reject` unsupported-parameter policy
-are currently accepted; other values fail catalog compilation instead of being
-silently ignored.
+Explicit request values always take precedence. The routing strategy is
+`priority_weighted`. Unsupported-parameter policy is explicit: `reject` fails,
+`drop` removes only non-semantic optional fields, and `passthrough` preserves
+typed manifest fields only when an eligible adapter declares support. Unknown
+wire fields are never accepted as arbitrary passthrough data.
 
 ## Development
 

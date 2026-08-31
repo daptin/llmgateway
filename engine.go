@@ -552,8 +552,12 @@ func (e *Engine) resolve(ctx context.Context, principal contract.Principal, requ
 	if err := request.Validate(); err != nil {
 		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "invalid request", 400, false, err)
 	}
-	if err := validateModelCapabilities(model, request); err != nil {
+	request, err = applyModelParameterPolicy(model, request)
+	if err != nil {
 		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "request uses a capability disabled for this model", 400, false, err)
+	}
+	if err := request.Validate(); err != nil {
+		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "invalid normalized request", 400, false, err)
 	}
 	if err := e.authorizer.Authorize(ctx, principal, model); err != nil {
 		return preparedRequest{}, normalizeError(err, contract.ErrorPermission, 403, false)

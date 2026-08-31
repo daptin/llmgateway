@@ -277,7 +277,9 @@ func validateModel(model Model) error {
 	if model.RoutingStrategy != "priority_weighted" {
 		return fmt.Errorf("model %q has unsupported routing strategy %q", model.ID, model.RoutingStrategy)
 	}
-	if model.UnsupportedParameterPolicy != "reject" {
+	switch model.UnsupportedParameterPolicy {
+	case "reject", "drop", "passthrough":
+	default:
 		return fmt.Errorf("model %q has unsupported parameter policy %q", model.ID, model.UnsupportedParameterPolicy)
 	}
 	if err := validateModelCapabilities(model); err != nil {

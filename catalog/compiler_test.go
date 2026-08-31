@@ -72,8 +72,7 @@ func TestCompileRejectsAcceptedLookingButUnimplementedModelConfiguration(t *test
 		mutate func(*Model)
 	}{
 		{name: "routing strategy", mutate: func(model *Model) { model.RoutingStrategy = "least_busy" }},
-		{name: "parameter drop", mutate: func(model *Model) { model.UnsupportedParameterPolicy = "drop" }},
-		{name: "parameter passthrough", mutate: func(model *Model) { model.UnsupportedParameterPolicy = "passthrough" }},
+		{name: "unknown parameter policy", mutate: func(model *Model) { model.UnsupportedParameterPolicy = "guess" }},
 		{name: "unknown default", mutate: func(model *Model) { model.DefaultParameters = []byte(`{"chat":{"magic":true}}`) }},
 		{name: "zero default", mutate: func(model *Model) { model.DefaultParameters = []byte(`{"chat":{"n":0}}`) }},
 		{name: "undeclared operation default", mutate: func(model *Model) { model.DefaultParameters = []byte(`{"embeddings":{"encoding_format":"float"}}`) }},
@@ -88,6 +87,16 @@ func TestCompileRejectsAcceptedLookingButUnimplementedModelConfiguration(t *test
 				t.Fatal("expected catalog rejection")
 			}
 		})
+	}
+}
+
+func TestCompileAcceptsImplementedParameterPolicies(t *testing.T) {
+	for _, policy := range []string{"reject", "drop", "passthrough"} {
+		document := validDocument()
+		document.Models[0].UnsupportedParameterPolicy = policy
+		if _, err := Compile(document); err != nil {
+			t.Fatalf("policy %q: %v", policy, err)
+		}
 	}
 }
 

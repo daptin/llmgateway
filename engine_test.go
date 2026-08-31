@@ -234,6 +234,65 @@ func TestInvokeRejectsModelCapabilityBeforeAdmission(t *testing.T) {
 	}
 }
 
+func TestModelParameterPoliciesAreExplicitAndDoNotMutateCaller(t *testing.T) {
+	tool := contract.Tool{Type: "function", Function: contract.FunctionDefinition{Name: "lookup", Parameters: []byte(`{"type":"object"}`)}}
+	for _, test := range []struct {
+		name      string
+		policy    string
+		features  map[string]bool
+		wantTools bool
+	}{
+		{name: "drop", policy: "drop", wantTools: false},
+		{name: "passthrough", policy: "passthrough", features: map[string]bool{"tools": true}, wantTools: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			document := testDocument()
+			document.Models[0].UnsupportedParameterPolicy = test.policy
+			provider := testkit.NewFaultAdapter(
+				adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}, Features: test.features},
+				testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "response"}, Usage: contract.Usage{TotalTokens: 1}}},
+			)
+			engine := newEngineForDocument(t, document, provider, testkit.NewAccountingStore())
+			if err := engine.Reload(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			request := chatRequest("policy-"+test.name, false)
+			request.Chat.Tools = []contract.Tool{tool}
+			if _, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, request); err != nil {
+				t.Fatal(err)
+			}
+			seen := provider.Requests()
+			if len(seen) != 1 || (len(seen[0].Chat.Tools) != 0) != test.wantTools {
+				t.Fatalf("upstream request = %+v", seen)
+			}
+			if len(request.Chat.Tools) != 1 {
+				t.Fatalf("caller request was mutated: %+v", request.Chat)
+			}
+		})
+	}
+}
+
+func TestDropPolicyRejectsSemanticCapabilityInput(t *testing.T) {
+	document := testDocument()
+	document.Models[0].UnsupportedParameterPolicy = "drop"
+	provider := testkit.NewFaultAdapter(adapter.Capabilities{
+		Operations: map[contract.Operation]bool{contract.OperationChat: true}, Features: map[string]bool{"vision": true},
+	})
+	store := testkit.NewAccountingStore()
+	engine := newEngineForDocument(t, document, provider, store)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	request := chatRequest("drop-semantic", false)
+	request.Chat.Messages[0].Content = append(request.Chat.Messages[0].Content,
+		contract.ContentPart{Type: "image_url", ImageURL: &contract.ImageURL{URL: "https://example.test/image.png"}})
+	_, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, request)
+	var public *contract.Error
+	if !errors.As(err, &public) || public.Code != contract.ErrorInvalidRequest || store.State(request.ID) != "" || len(provider.Requests()) != 0 {
+		t.Fatalf("error=%v accounting=%q requests=%d", err, store.State(request.ID), len(provider.Requests()))
+	}
+}
+
 func TestTerminalTelemetryHasStableSafeDimensions(t *testing.T) {
 	provider := testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		testkit.AdapterStep{Response: contract.Response{Usage: contract.Usage{InputTokens: 2, OutputTokens: 3, TotalTokens: 5}}})

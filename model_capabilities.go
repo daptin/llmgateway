@@ -8,16 +8,79 @@ import (
 	"github.com/daptin/llmgateway/contract"
 )
 
-func validateModelCapabilities(model catalog.Model, request contract.Request) error {
+func applyModelParameterPolicy(model catalog.Model, request contract.Request) (contract.Request, error) {
+	missing := make([]string, 0)
 	for _, capability := range requiredAdapterFeatures(request) {
-		if capability == "streaming" {
-			continue
-		}
-		if !model.Capabilities[capability] {
-			return fmt.Errorf("model %q does not enable %s", model.Name, capability)
+		if capability != "streaming" && !model.Capabilities[capability] {
+			missing = append(missing, capability)
 		}
 	}
-	return nil
+	if len(missing) == 0 || model.UnsupportedParameterPolicy == "passthrough" {
+		return request, nil
+	}
+	if model.UnsupportedParameterPolicy == "reject" {
+		return contract.Request{}, fmt.Errorf("model %q does not enable %s", model.Name, missing[0])
+	}
+	if model.UnsupportedParameterPolicy != "drop" {
+		return contract.Request{}, fmt.Errorf("model %q has invalid unsupported parameter policy", model.Name)
+	}
+	for _, capability := range missing {
+		var err error
+		request, err = dropOptionalCapability(request, capability)
+		if err != nil {
+			return contract.Request{}, fmt.Errorf("model %q cannot drop %s: %w", model.Name, capability, err)
+		}
+	}
+	return request, nil
+}
+
+func dropOptionalCapability(request contract.Request, capability string) (contract.Request, error) {
+	switch capability {
+	case "logprobs":
+		chat := *request.Chat
+		chat.Logprobs = false
+		chat.TopLogprobs = 0
+		request.Chat = &chat
+	case "json_schema":
+		switch request.Operation {
+		case contract.OperationChat:
+			chat := *request.Chat
+			chat.ResponseFormat = nil
+			request.Chat = &chat
+		case contract.OperationResponses:
+			responses := *request.Responses
+			responses.TextFormat = nil
+			request.Responses = &responses
+		}
+	case "dimensions":
+		embeddings := *request.Embeddings
+		embeddings.Dimensions = 0
+		request.Embeddings = &embeddings
+	case "tools":
+		switch request.Operation {
+		case contract.OperationChat:
+			if messagesUseTools(request.Chat.Messages) {
+				return contract.Request{}, fmt.Errorf("tool-call history is semantic input")
+			}
+			chat := *request.Chat
+			chat.Tools = nil
+			chat.ToolChoice = nil
+			request.Chat = &chat
+		case contract.OperationResponses:
+			if responsesUseTools(request.Responses.Input) {
+				return contract.Request{}, fmt.Errorf("function-call input is semantic input")
+			}
+			responses := *request.Responses
+			responses.Tools = nil
+			responses.ToolChoice = nil
+			request.Responses = &responses
+		}
+	case "vision", "audio", "token_ids":
+		return contract.Request{}, fmt.Errorf("semantic input cannot be removed")
+	default:
+		return contract.Request{}, fmt.Errorf("unsupported capability cannot be removed")
+	}
+	return request, nil
 }
 
 func requiredAdapterFeatures(request contract.Request) []string {
