@@ -48,6 +48,7 @@ type Adapter struct {
 	maxResponseBytes int64
 	maxEventBytes    int
 	now              func() time.Time
+	allowPrivate     bool
 	clientsMu        sync.Mutex
 	clients          map[time.Duration]*http.Client
 }
@@ -59,6 +60,9 @@ func (f Factory) Build(_ context.Context, provider catalog.Provider, secret adap
 	}
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && provider.AllowInsecure) {
 		return nil, errors.New("OpenAI-compatible provider requires HTTPS unless insecure HTTP is explicit")
+	}
+	if !provider.AllowPrivateNetwork && privateHost(parsed.Hostname()) {
+		return nil, errors.New("OpenAI-compatible provider private-network access requires explicit opt-in")
 	}
 	parameters := providerParameters{}
 	if len(bytes.TrimSpace(provider.Parameters)) > 0 && !bytes.Equal(bytes.TrimSpace(provider.Parameters), []byte("{}")) {
@@ -93,7 +97,8 @@ func (f Factory) Build(_ context.Context, provider catalog.Provider, secret adap
 	}
 	return &Adapter{
 		baseURL: parsed, apiKey: key, parameters: parameters, client: f.Client, transport: transport,
-		maxResponseBytes: maximum, maxEventBytes: frameMaximum, now: f.Now, clients: make(map[time.Duration]*http.Client),
+		maxResponseBytes: maximum, maxEventBytes: frameMaximum, now: f.Now, allowPrivate: provider.AllowPrivateNetwork,
+		clients: make(map[time.Duration]*http.Client),
 	}, nil
 }
 
@@ -241,8 +246,8 @@ func (a *Adapter) clientFor(connectTimeout time.Duration) *http.Client {
 	transport := a.transport
 	if base, ok := a.transport.(*http.Transport); ok {
 		clone := base.Clone()
+		clone.DialContext = safeDialContext(connectTimeout, a.allowPrivate)
 		if connectTimeout > 0 {
-			clone.DialContext = (&net.Dialer{Timeout: connectTimeout, KeepAlive: 30 * time.Second}).DialContext
 			clone.TLSHandshakeTimeout = connectTimeout
 			clone.ResponseHeaderTimeout = connectTimeout
 		}
@@ -251,6 +256,51 @@ func (a *Adapter) clientFor(connectTimeout time.Duration) *http.Client {
 	client := &http.Client{Transport: transport}
 	a.clients[connectTimeout] = client
 	return client
+}
+
+func safeDialContext(timeout time.Duration, allowPrivate bool) func(context.Context, string, string) (net.Conn, error) {
+	dialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
+	return func(ctx context.Context, network, address string) (net.Conn, error) {
+		if allowPrivate {
+			return dialer.DialContext(ctx, network, address)
+		}
+		host, port, err := net.SplitHostPort(address)
+		if err != nil {
+			return nil, errors.New("upstream address is invalid")
+		}
+		addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+		if err != nil {
+			return nil, err
+		}
+		for _, candidate := range addresses {
+			if privateIP(candidate.IP) {
+				continue
+			}
+			connection, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
+			if dialErr == nil {
+				return connection, nil
+			}
+			err = dialErr
+		}
+		if err != nil {
+			return nil, err
+		}
+		return nil, errors.New("upstream resolved only to private-network addresses")
+	}
+}
+
+func privateHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return privateIP(ip)
+	}
+	return false
+}
+
+func privateIP(ip net.IP) bool {
+	return ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
 }
 
 func readBounded(reader io.Reader, maximum int64) ([]byte, error) {

@@ -18,14 +18,15 @@ type Document struct {
 }
 
 type Provider struct {
-	ID            contract.ID
-	Name          string
-	Type          string
-	BaseURL       string
-	AllowInsecure bool
-	SecretRef     string
-	Parameters    json.RawMessage
-	Enabled       bool
+	ID                  contract.ID
+	Name                string
+	Type                string
+	BaseURL             string
+	AllowInsecure       bool
+	AllowPrivateNetwork bool
+	SecretRef           string
+	Parameters          json.RawMessage
+	Enabled             bool
 }
 
 type Model struct {

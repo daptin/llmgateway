@@ -46,3 +46,6 @@ the same network.
 Olric loss may reduce cache hit rate and may introduce at most one fixed-window
 counter interval of documented RPM/TPM skew. It must not widen durable token or
 monetary budgets.
+
+Provider URLs are HTTPS-only by default. Insecure HTTP and access to loopback,
+link-local, or private networks require separate explicit provider opt-ins.

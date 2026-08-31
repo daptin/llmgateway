@@ -24,6 +24,14 @@ jobs:
       - run: go test ./...
       - run: go test -race ./...
       - run: go vet ./...
+      - name: Vulnerability scan
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
+          govulncheck ./...
+      - name: License and dependency boundary
+        run: |
+          test -f LICENSE
+          test "$(go list -m all | wc -l | tr -d ' ')" = "1"
       - name: Enforce host independence
         run: |
           if go list -deps ./... | grep -E 'github.com/daptin/daptin|github.com/gin-gonic/gin|github.com/artpar/api2go|github.com/jmoiron/sqlx|github.com/doug-martin/goqu|github.com/buraksezer/olric|database/sql'; then

@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/daptin/llmgateway/contract"
 )
@@ -75,6 +76,12 @@ func Compile(doc Document) (*Snapshot, error) {
 		return nil, err
 	}
 	for _, deployment := range doc.Deployments {
+		if deployment.RequestTimeout == 0 {
+			deployment.RequestTimeout = 120 * time.Second
+		}
+		if deployment.ConnectTimeout == 0 {
+			deployment.ConnectTimeout = 5 * time.Second
+		}
 		if err := validateDeployment(deployment, s.models, s.providers); err != nil {
 			return nil, err
 		}
@@ -284,6 +291,9 @@ func validateDeployment(deployment Deployment, models map[contract.ID]Model, pro
 	}
 	if deployment.MaxConcurrency < -1 || deployment.RPM < -1 || deployment.TPM < -1 {
 		return fmt.Errorf("deployment %q limits must be -1 or non-negative", deployment.ID)
+	}
+	if deployment.RequestTimeout < time.Millisecond || deployment.ConnectTimeout < time.Millisecond || deployment.ConnectTimeout > deployment.RequestTimeout {
+		return fmt.Errorf("deployment %q timeouts must be positive and connect cannot exceed request", deployment.ID)
 	}
 	allowed := make(map[contract.Operation]struct{}, len(model.Operations))
 	for _, operation := range model.Operations {

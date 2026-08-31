@@ -18,7 +18,7 @@ import (
 
 func buildAdapter(t *testing.T, server *httptest.Server, parameters string, options Factory) *Adapter {
 	t.Helper()
-	provider := catalog.Provider{ID: "p", Name: "provider", Type: "openai-compatible", BaseURL: server.URL + "/v1", AllowInsecure: true, Parameters: json.RawMessage(parameters), Enabled: true}
+	provider := catalog.Provider{ID: "p", Name: "provider", Type: "openai-compatible", BaseURL: server.URL + "/v1", AllowInsecure: true, AllowPrivateNetwork: true, Parameters: json.RawMessage(parameters), Enabled: true}
 	built, err := options.Build(context.Background(), provider, baseadapter.NewSecret([]byte("secret-key")))
 	if err != nil {
 		t.Fatal(err)
@@ -74,6 +74,13 @@ func TestHealthCheckUsesAuthenticatedModelsEndpoint(t *testing.T) {
 	defer server.Close()
 	if err := buildAdapter(t, server, `{}`, Factory{}).HealthCheck(context.Background(), deployment()); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestBuildRequiresExplicitPrivateNetworkOptIn(t *testing.T) {
+	provider := catalog.Provider{ID: "p", Name: "provider", Type: "openai-compatible", BaseURL: "https://127.0.0.1/v1", Enabled: true}
+	if _, err := (Factory{}).Build(context.Background(), provider, baseadapter.NewSecret([]byte("secret"))); err == nil || !strings.Contains(err.Error(), "private-network") {
+		t.Fatalf("private provider error=%v", err)
 	}
 }
 
