@@ -364,6 +364,49 @@ func TestEngineRetriesOnlyRetryableFailure(t *testing.T) {
 	if attempts := faultAdapter.Attempts(); len(attempts) != 2 || attempts[0] == attempts[1] {
 		t.Fatalf("expected two different deployments, got %v", attempts)
 	}
+	completion, ok := store.Completion("request")
+	if !ok || len(completion.Attempts) != 2 {
+		t.Fatalf("completion=%+v present=%v", completion, ok)
+	}
+	if completion.Attempts[0].Number != 1 || completion.Attempts[0].Usage.TotalTokens != 10 ||
+		!completion.Attempts[0].Usage.Estimated || completion.Attempts[1].Number != 2 ||
+		completion.Attempts[1].Usage.TotalTokens != 1 || completion.Usage.TotalTokens != 11 || !completion.Usage.Estimated {
+		t.Fatalf("retry usage did not reconcile: %+v", completion)
+	}
+}
+
+func TestEngineReservesBoundedExposureForEveryPossibleAttempt(t *testing.T) {
+	document := testDocument()
+	document.Deployments = append(document.Deployments, catalog.Deployment{
+		ID: "d2", Name: "second", ProviderID: "p", ModelID: "m", UpstreamModel: "other",
+		Operations: []contract.Operation{contract.OperationChat}, Weight: 1, MaxConcurrency: -1, RPM: -1, TPM: -1, Enabled: true,
+	})
+	document.Policies = []catalog.Policy{{
+		ID: "model-budget", Name: "model budget",
+		Limits: []catalog.Limit{{Metric: "total_tokens", Window: "1m", Maximum: 10, Mode: "hard"}},
+	}}
+	document.Models[0].PolicyID = "model-budget"
+	provider := testkit.NewFaultAdapter(
+		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "must-not-run"}}},
+	)
+	store := testkit.NewAccountingStore()
+	engine := newEngineForDocument(t, document, provider, store)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	request := chatRequest("retry-budget", false)
+	_, err := engine.Invoke(context.Background(), contract.Principal{}, request)
+	var public *contract.Error
+	if !errors.As(err, &public) || public.Code != contract.ErrorInsufficientQuota || public.HTTPStatus != http.StatusPaymentRequired {
+		t.Fatalf("error=%v", err)
+	}
+	if state := store.State(request.ID); state != "" {
+		t.Fatalf("denied retry exposure created usage state %q", state)
+	}
+	if attempts := provider.Attempts(); len(attempts) != 0 {
+		t.Fatalf("provider was called before reserving all retry exposure: %v", attempts)
+	}
 }
 
 func TestRejectedNewerCatalogDegradesReadinessWithoutReplacingSnapshot(t *testing.T) {

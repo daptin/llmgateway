@@ -93,6 +93,13 @@ func TestStreamRetriesBeforeFirstEvent(t *testing.T) {
 	if attempts := fault.Attempts(); len(attempts) != 2 || attempts[0] == attempts[1] {
 		t.Fatalf("expected pre-commit failover, got %v", attempts)
 	}
+	completion, ok := store.Completion("request")
+	if !ok || len(completion.Attempts) != 2 || completion.Attempts[0].Number != 1 ||
+		completion.Attempts[0].Usage.TotalTokens != 10 || !completion.Attempts[0].Usage.Estimated ||
+		completion.Attempts[1].Number != 2 || completion.Attempts[1].Usage.TotalTokens != 1 ||
+		completion.Usage.TotalTokens != 11 || !completion.Usage.Estimated {
+		t.Fatalf("stream retry usage did not reconcile: %+v present=%v", completion, ok)
+	}
 }
 
 func TestStreamFirstEventTimeoutFinalizesWithoutCommit(t *testing.T) {
@@ -210,5 +217,48 @@ func TestStreamConservativelySettlesMissingProviderUsage(t *testing.T) {
 	completion, ok := store.Completion(request.ID)
 	if !ok || completion.Usage.TotalTokens != 18 || !completion.Usage.Estimated || len(completion.Attempts) != 1 || completion.Attempts[0].Usage != completion.Usage {
 		t.Fatalf("completion = %+v, present=%v", completion, ok)
+	}
+}
+
+func TestStreamSkipsBoundedPreambleUntilSemanticOutput(t *testing.T) {
+	fault := testkit.NewFaultAdapter(
+		streamCapabilities(),
+		testkit.AdapterStep{Events: []contract.StreamEvent{
+			{Type: "usage", Usage: &contract.Usage{InputTokens: 2, TotalTokens: 2}},
+			{Type: "content_delta", Chat: &contract.ChatDelta{Content: "hello"}},
+			{Type: "finish", Usage: &contract.Usage{InputTokens: 2, OutputTokens: 1, TotalTokens: 3}, Terminal: true},
+		}},
+	)
+	store := testkit.NewAccountingStore()
+	stream, err := streamEngine(t, testDocument(), fault, store).Stream(context.Background(), contract.Principal{}, chatRequest("preamble", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := stream.Next(context.Background())
+	if err != nil || first.Chat == nil || first.Chat.Content != "hello" || !first.OutputCommitted {
+		t.Fatalf("first client event=%+v err=%v", first, err)
+	}
+	if _, err := stream.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	completion, ok := store.Completion("preamble")
+	if !ok || completion.Usage.TotalTokens != 3 {
+		t.Fatalf("completion=%+v present=%v", completion, ok)
+	}
+}
+
+func TestStreamRejectsTerminalPreambleWithoutCommit(t *testing.T) {
+	fault := testkit.NewFaultAdapter(streamCapabilities(), testkit.AdapterStep{Events: []contract.StreamEvent{
+		{Type: "usage", Usage: &contract.Usage{TotalTokens: 1}, Terminal: true},
+	}})
+	store := testkit.NewAccountingStore()
+	_, err := streamEngine(t, testDocument(), fault, store).Stream(context.Background(), contract.Principal{}, chatRequest("terminal-preamble", true))
+	var public *contract.Error
+	if !errors.As(err, &public) || public.Code != contract.ErrorProvider || store.State("terminal-preamble") != "finalized" {
+		t.Fatalf("error=%v state=%q", err, store.State("terminal-preamble"))
+	}
+	completion, ok := store.Completion("terminal-preamble")
+	if !ok || len(completion.Attempts) != 1 || completion.Attempts[0].OutputCommitted {
+		t.Fatalf("completion=%+v present=%v", completion, ok)
 	}
 }

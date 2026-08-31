@@ -7,6 +7,7 @@ import (
 	"github.com/daptin/llmgateway/accounting"
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
+	"github.com/daptin/llmgateway/internal/routing"
 )
 
 // settledUsage gives provider-reported token counts precedence. Providers that
@@ -67,4 +68,56 @@ func applyRequestExposure(request *contract.Request) error {
 		request.EstimatedUsage.Estimated = true
 	}
 	return normalizeTokenTotal(&request.EstimatedUsage)
+}
+
+func reservationExposure(estimate contract.Usage, attempts []routing.Attempt) (contract.Usage, []contract.Usage, error) {
+	if len(attempts) == 0 {
+		return contract.Usage{}, nil, errors.New("route plan has no attempts")
+	}
+	exposure := contract.Usage{Estimated: true}
+	perAttempt := make([]contract.Usage, 0, len(attempts))
+	for _, attempt := range attempts {
+		usage, err := settledUsage(contract.Usage{}, estimate, attempt.Deployment.Pricing)
+		if err != nil {
+			return contract.Usage{}, nil, err
+		}
+		perAttempt = append(perAttempt, usage)
+		exposure, err = addUsage(exposure, usage)
+		if err != nil {
+			return contract.Usage{}, nil, err
+		}
+	}
+	return exposure, perAttempt, nil
+}
+
+func aggregateAttemptUsage(attempts []contract.Attempt) (contract.Usage, error) {
+	var total contract.Usage
+	for _, attempt := range attempts {
+		var err error
+		total, err = addUsage(total, attempt.Usage)
+		if err != nil {
+			return contract.Usage{}, err
+		}
+	}
+	return total, nil
+}
+
+func addUsage(left, right contract.Usage) (contract.Usage, error) {
+	values := [][2]int64{
+		{left.InputTokens, right.InputTokens}, {left.OutputTokens, right.OutputTokens},
+		{left.CacheReadTokens, right.CacheReadTokens}, {left.CacheWriteTokens, right.CacheWriteTokens},
+		{left.ReasoningTokens, right.ReasoningTokens}, {left.TotalTokens, right.TotalTokens},
+		{left.CostMicros, right.CostMicros},
+	}
+	sums := make([]int64, len(values))
+	for index, pair := range values {
+		if pair[0] < 0 || pair[1] < 0 || pair[0] > math.MaxInt64-pair[1] {
+			return contract.Usage{}, errors.New("aggregate usage overflows")
+		}
+		sums[index] = pair[0] + pair[1]
+	}
+	return contract.Usage{
+		InputTokens: sums[0], OutputTokens: sums[1], CacheReadTokens: sums[2], CacheWriteTokens: sums[3],
+		ReasoningTokens: sums[4], TotalTokens: sums[5], CostMicros: sums[6], Estimated: left.Estimated || right.Estimated,
+	}, nil
 }

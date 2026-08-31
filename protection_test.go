@@ -145,3 +145,29 @@ func TestCounterFailureFailsClosedBeforeProvider(t *testing.T) {
 		t.Fatalf("provider was called without protection: %v", provider.Attempts())
 	}
 }
+
+func TestGateRejectionDoesNotCreateOrRenumberUpstreamAttempts(t *testing.T) {
+	document := testDocument()
+	document.Deployments = append(document.Deployments, catalog.Deployment{
+		ID: "d2", Name: "second", ProviderID: "p", ModelID: "m", UpstreamModel: "other",
+		Operations: []contract.Operation{contract.OperationChat}, Weight: 1, MaxConcurrency: -1, RPM: -1, TPM: -1, Enabled: true,
+	})
+	clock := testkit.NewAutoClock(time.Now())
+	counters := testkit.NewCounterStore(clock.Now)
+	if _, err := counters.Add(context.Background(), "llmgateway:deployment:d:rate_cooldown", 1, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	provider := testkit.NewFaultAdapter(
+		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "ok"}, Usage: contract.Usage{TotalTokens: 1}}},
+	)
+	store := testkit.NewAccountingStore()
+	engine := protectedEngine(t, document, provider, store, counters, clock, llmgateway.Options{})
+	if _, err := engine.Invoke(context.Background(), contract.Principal{}, chatRequest("gated-route", false)); err != nil {
+		t.Fatal(err)
+	}
+	completion, ok := store.Completion("gated-route")
+	if !ok || len(completion.Attempts) != 1 || completion.Attempts[0].Number != 1 || completion.Attempts[0].DeploymentID != "d2" {
+		t.Fatalf("completion=%+v present=%v", completion, ok)
+	}
+}

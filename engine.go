@@ -443,12 +443,20 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 		return cached, nil
 	}
 	attempts := make([]contract.Attempt, 0, len(prepared.plan.Attempts))
+	attemptTotal := func() contract.Usage {
+		usage, aggregateErr := aggregateAttemptUsage(attempts)
+		if aggregateErr != nil {
+			return prepared.reserved
+		}
+		return usage
+	}
+	attemptNumber := 0
 	for index, routeAttempt := range prepared.plan.Attempts {
 		lease, gateErr := e.beforeAttempt(ctx, routeAttempt.Deployment, prepared.request)
 		if gateErr != nil {
 			normalized := normalizeError(gateErr, contract.ErrorUnavailable, 503, true)
 			if !normalized.Retryable || index == len(prepared.plan.Attempts)-1 {
-				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
+				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
 					return contract.Response{}, finishErr
 				}
 				return contract.Response{}, normalized
@@ -459,22 +467,23 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 			continue
 		}
 		started := e.clock.Now()
+		attemptNumber++
 		response, normalized := e.invokeProvider(ctx, prepared.runtime.adapters[routeAttempt.Provider.ID], routeAttempt.Deployment, prepared.request, lease)
 		ended := e.clock.Now()
 		if normalized != nil {
 			attempts = append(attempts, contract.Attempt{
-				Number: index + 1, ProviderID: routeAttempt.Provider.ID, DeploymentID: routeAttempt.Deployment.ID,
+				Number: attemptNumber, ProviderID: routeAttempt.Provider.ID, DeploymentID: routeAttempt.Deployment.ID,
 				StartedAt: started, EndedAt: ended, Outcome: "failed", ErrorCode: normalized.Code,
-				HTTPStatus: normalized.HTTPStatus, Retryable: normalized.Retryable,
+				HTTPStatus: normalized.HTTPStatus, Retryable: normalized.Retryable, Usage: prepared.attemptExposure[index],
 			})
 			if !normalized.Retryable || index == len(prepared.plan.Attempts)-1 {
-				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Attempts: attempts, EndedAt: ended}); finishErr != nil {
+				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: attemptTotal(), Attempts: attempts, EndedAt: ended}); finishErr != nil {
 					return contract.Response{}, finishErr
 				}
 				return contract.Response{}, normalized
 			}
 			if waitErr := e.waitForRetry(ctx, index, normalized); waitErr != nil {
-				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "cancelled", HTTPStatus: 499, ErrorCode: contract.ErrorProvider, Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
+				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "cancelled", HTTPStatus: 499, ErrorCode: contract.ErrorProvider, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
 					return contract.Response{}, finishErr
 				}
 				return contract.Response{}, waitErr
@@ -484,8 +493,8 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 		usage, usageErr := settledUsage(response.Usage, prepared.request.EstimatedUsage, routeAttempt.Deployment.Pricing)
 		if usageErr != nil || !usage.Valid() {
 			normalized := publicError(contract.ErrorProvider, "provider returned invalid usage", 502, false, usageErr)
-			attempts = append(attempts, contract.Attempt{Number: index + 1, ProviderID: routeAttempt.Provider.ID, DeploymentID: routeAttempt.Deployment.ID, StartedAt: started, EndedAt: ended, Outcome: "failed", ErrorCode: normalized.Code, HTTPStatus: normalized.HTTPStatus})
-			if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: 502, ErrorCode: normalized.Code, Attempts: attempts, EndedAt: ended}); finishErr != nil {
+			attempts = append(attempts, contract.Attempt{Number: attemptNumber, ProviderID: routeAttempt.Provider.ID, DeploymentID: routeAttempt.Deployment.ID, StartedAt: started, EndedAt: ended, Outcome: "failed", ErrorCode: normalized.Code, HTTPStatus: normalized.HTTPStatus, Usage: prepared.attemptExposure[index]})
+			if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: 502, ErrorCode: normalized.Code, Usage: attemptTotal(), Attempts: attempts, EndedAt: ended}); finishErr != nil {
 				return contract.Response{}, finishErr
 			}
 			return contract.Response{}, normalized
@@ -493,15 +502,23 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 		response.RequestID = prepared.request.ID
 		response.Model = prepared.request.PublicModel
 		response.Usage = usage
-		attempts = append(attempts, contract.Attempt{Number: index + 1, ProviderID: routeAttempt.Provider.ID, DeploymentID: routeAttempt.Deployment.ID, StartedAt: started, EndedAt: ended, Outcome: "succeeded", HTTPStatus: 200, Usage: usage})
-		if guardrailErr := e.checkOutput(ctx, prepared, response); guardrailErr != nil {
-			normalized := normalizeError(guardrailErr, contract.ErrorPermission, 400, false)
-			if finishErr := finish(contract.Completion{Token: prepared.token, Status: "rejected", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: usage, Attempts: attempts, EndedAt: ended}); finishErr != nil {
+		attempts = append(attempts, contract.Attempt{Number: attemptNumber, ProviderID: routeAttempt.Provider.ID, DeploymentID: routeAttempt.Deployment.ID, StartedAt: started, EndedAt: ended, Outcome: "succeeded", HTTPStatus: 200, Usage: usage})
+		total, aggregateErr := aggregateAttemptUsage(attempts)
+		if aggregateErr != nil {
+			normalized := publicError(contract.ErrorProvider, "provider usage exceeds supported aggregate range", 502, false, aggregateErr)
+			if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: 502, ErrorCode: normalized.Code, Usage: prepared.reserved, Attempts: attempts, EndedAt: ended}); finishErr != nil {
 				return contract.Response{}, finishErr
 			}
 			return contract.Response{}, normalized
 		}
-		if err := finish(contract.Completion{Token: prepared.token, Status: "succeeded", HTTPStatus: 200, Usage: usage, Attempts: attempts, EndedAt: ended}); err != nil {
+		if guardrailErr := e.checkOutput(ctx, prepared, response); guardrailErr != nil {
+			normalized := normalizeError(guardrailErr, contract.ErrorPermission, 400, false)
+			if finishErr := finish(contract.Completion{Token: prepared.token, Status: "rejected", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: total, Attempts: attempts, EndedAt: ended}); finishErr != nil {
+				return contract.Response{}, finishErr
+			}
+			return contract.Response{}, normalized
+		}
+		if err := finish(contract.Completion{Token: prepared.token, Status: "succeeded", HTTPStatus: 200, Usage: total, Attempts: attempts, EndedAt: ended}); err != nil {
 			return contract.Response{}, err
 		}
 		e.storeCache(ctx, cacheKey, response)
@@ -511,12 +528,14 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 }
 
 type preparedRequest struct {
-	runtime   *runtimeSnapshot
-	request   contract.Request
-	model     catalog.Model
-	plan      routing.Plan
-	token     contract.ReservationToken
-	principal contract.Principal
+	runtime         *runtimeSnapshot
+	request         contract.Request
+	model           catalog.Model
+	plan            routing.Plan
+	token           contract.ReservationToken
+	principal       contract.Principal
+	reserved        contract.Usage
+	attemptExposure []contract.Usage
 }
 
 func (e *Engine) prepare(ctx context.Context, principal contract.Principal, request contract.Request) (preparedRequest, error) {
@@ -581,33 +600,28 @@ func (e *Engine) admit(ctx context.Context, principal contract.Principal, prepar
 	if len(plan.Attempts) > e.maxAttempts {
 		plan.Attempts = plan.Attempts[:e.maxAttempts]
 	}
-	estimate := prepared.request.EstimatedUsage
-	if normalizeErr := normalizeTokenTotal(&estimate); normalizeErr != nil || !estimate.Valid() {
+	attemptEstimate := prepared.request.EstimatedUsage
+	if normalizeErr := normalizeTokenTotal(&attemptEstimate); normalizeErr != nil || !attemptEstimate.Valid() {
 		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "invalid usage estimate", 400, false, nil)
 	}
-	for _, routeAttempt := range plan.Attempts {
-		cost, costErr := accounting.CostMicros(estimate, routeAttempt.Deployment.Pricing)
-		if costErr != nil {
-			return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "usage estimate exceeds supported range", 400, false, costErr)
-		}
-		if cost > estimate.CostMicros {
-			estimate.CostMicros = cost
-		}
+	exposure, attemptExposure, exposureErr := reservationExposure(attemptEstimate, plan.Attempts)
+	if exposureErr != nil {
+		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "usage estimate exceeds supported range", 400, false, exposureErr)
 	}
 	bindings, err := policyBindings(prepared.runtime.catalog, principal, prepared.model)
 	if err != nil {
 		return preparedRequest{}, publicError(contract.ErrorInternal, "invalid effective policy", 500, false, err)
 	}
 	reservations, err := accounting.Reservations(bindings, accounting.Measures{
-		Requests: 1, InputTokens: estimate.InputTokens, OutputTokens: estimate.OutputTokens,
-		TotalTokens: estimate.TotalTokens, CostMicros: estimate.CostMicros, Concurrency: 1,
+		Requests: 1, InputTokens: exposure.InputTokens, OutputTokens: exposure.OutputTokens,
+		TotalTokens: exposure.TotalTokens, CostMicros: exposure.CostMicros, Concurrency: 1,
 	}, prepared.request.StartedAt)
 	if err != nil {
 		return preparedRequest{}, publicError(contract.ErrorInternal, "invalid effective policy", 500, false, err)
 	}
 	token, err := e.accounting.Admit(ctx, contract.Admission{
 		RequestID: prepared.request.ID, Principal: principal, ModelID: prepared.model.ID, Operation: prepared.request.Operation,
-		StartedAt: prepared.request.StartedAt, EstimatedUsage: estimate, LimitReservations: reservations,
+		StartedAt: prepared.request.StartedAt, EstimatedUsage: exposure, LimitReservations: reservations,
 	})
 	if err != nil {
 		if errors.Is(err, accounting.ErrLimitExceeded) {
@@ -615,9 +629,11 @@ func (e *Engine) admit(ctx context.Context, principal contract.Principal, prepar
 		}
 		return preparedRequest{}, publicError(contract.ErrorInternal, "accounting admission failed", 500, false, err)
 	}
-	prepared.request.EstimatedUsage = estimate
+	prepared.request.EstimatedUsage = attemptEstimate
 	prepared.plan = plan
 	prepared.token = token
+	prepared.reserved = exposure
+	prepared.attemptExposure = attemptExposure
 	return prepared, nil
 }
 

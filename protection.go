@@ -180,6 +180,33 @@ func nextProviderEventWithin(ctx context.Context, stream adapter.Stream, timeout
 	return event, err
 }
 
+func firstSemanticEventWithin(ctx context.Context, stream adapter.Stream, timeout time.Duration) (contract.StreamEvent, *contract.Usage, error) {
+	const maximumPreambleEvents = 16
+	nextContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	var usage *contract.Usage
+	for count := 0; count < maximumPreambleEvents; count++ {
+		event, err := nextProviderEvent(nextContext, stream)
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			return contract.StreamEvent{}, usage, publicError(contract.ErrorTimeout, "upstream first event timed out", 504, true, err)
+		}
+		if err != nil {
+			return contract.StreamEvent{}, usage, err
+		}
+		if event.Usage != nil {
+			copy := *event.Usage
+			usage = &copy
+		}
+		if event.Chat != nil || event.Response != nil {
+			return event, usage, nil
+		}
+		if event.Terminal {
+			return contract.StreamEvent{}, usage, publicError(contract.ErrorProvider, "upstream stream ended before semantic output", 502, false, nil)
+		}
+	}
+	return contract.StreamEvent{}, usage, publicError(contract.ErrorProvider, "upstream stream preamble exceeded its event bound", 502, false, nil)
+}
+
 func closeProviderStream(stream adapter.Stream) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
