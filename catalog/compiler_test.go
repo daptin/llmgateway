@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -150,8 +151,12 @@ func TestCompiledDefaultsNormalizeWithoutMutatingCaller(t *testing.T) {
 func TestCompileRejectsSamplingDefaultsWithoutCapabilities(t *testing.T) {
 	for _, defaults := range []string{
 		`{"chat":{"frequency_penalty":1}}`, `{"chat":{"parallel_tool_calls":false}}`, `{"chat":{"reasoning_effort":"low"}}`,
+		`{"responses":{"parallel_tool_calls":false}}`, `{"responses":{"reasoning_effort":"low"}}`,
 	} {
 		document := validDocument()
+		if strings.Contains(defaults, `"responses"`) {
+			document.Models[0].Operations = append(document.Models[0].Operations, contract.OperationResponses)
+		}
 		document.Models[0].DefaultParameters = []byte(defaults)
 		if _, err := Compile(document); err == nil {
 			t.Fatalf("accepted undeclared sampling capability default %s", defaults)

@@ -3,11 +3,15 @@ package contract
 import "encoding/json"
 
 type ResponsesRequest struct {
-	Instructions string
-	Input        []ResponseInputItem
-	Tools        []Tool
-	ToolChoice   *ToolChoice
-	TextFormat   *ResponseFormat
+	Instructions      string
+	Input             []ResponseInputItem
+	Tools             []Tool
+	ToolChoice        *ToolChoice
+	TextFormat        *ResponseFormat
+	Temperature       *float64
+	TopP              *float64
+	ParallelToolCalls *bool
+	ReasoningEffort   string
 }
 
 type ResponseInputItem struct {

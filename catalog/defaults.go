@@ -31,7 +31,11 @@ type chatDefaults struct {
 }
 
 type responsesDefaults struct {
-	MaxOutputTokens *int64 `json:"max_output_tokens,omitempty"`
+	MaxOutputTokens   *int64   `json:"max_output_tokens,omitempty"`
+	Temperature       *float64 `json:"temperature,omitempty"`
+	TopP              *float64 `json:"top_p,omitempty"`
+	ParallelToolCalls *bool    `json:"parallel_tool_calls,omitempty"`
+	ReasoningEffort   *string  `json:"reasoning_effort,omitempty"`
 }
 
 type embeddingsDefaults struct {
@@ -76,11 +80,11 @@ func parseModelDefaults(model Model) (modelDefaults, error) {
 	}
 	for capability, configured := range map[string]bool{
 		"penalties":      defaults.Chat.FrequencyPenalty != nil || defaults.Chat.PresencePenalty != nil,
-		"parallel_tools": defaults.Chat.ParallelToolCalls != nil,
-		"reasoning":      defaults.Chat.ReasoningEffort != nil,
+		"parallel_tools": defaults.Chat.ParallelToolCalls != nil || defaults.Responses.ParallelToolCalls != nil,
+		"reasoning":      defaults.Chat.ReasoningEffort != nil || defaults.Responses.ReasoningEffort != nil,
 	} {
 		if configured && !model.Capabilities[capability] {
-			return modelDefaults{}, fmt.Errorf("model %q chat defaults require the %s capability", model.ID, capability)
+			return modelDefaults{}, fmt.Errorf("model %q defaults require the %s capability", model.ID, capability)
 		}
 	}
 	return defaults, nil
@@ -115,6 +119,13 @@ func (d modelDefaults) validate() error {
 	if (d.Responses.MaxOutputTokens != nil && *d.Responses.MaxOutputTokens < 1) || (d.Embeddings.Dimensions != nil && *d.Embeddings.Dimensions < 1) {
 		return errors.New("response token and embedding dimension defaults cannot be negative")
 	}
+	if !validDefaultRange(d.Responses.Temperature, 0, 2) || !validDefaultRange(d.Responses.TopP, 0, 1) {
+		return errors.New("responses sampling defaults are out of range")
+	}
+	if d.Responses.ReasoningEffort != nil && *d.Responses.ReasoningEffort != "none" && *d.Responses.ReasoningEffort != "minimal" &&
+		*d.Responses.ReasoningEffort != "low" && *d.Responses.ReasoningEffort != "medium" && *d.Responses.ReasoningEffort != "high" && *d.Responses.ReasoningEffort != "xhigh" {
+		return errors.New("responses reasoning_effort default is invalid")
+	}
 	if d.Embeddings.EncodingFormat != nil && *d.Embeddings.EncodingFormat != "float" && *d.Embeddings.EncodingFormat != "base64" {
 		return errors.New("embedding encoding_format default must be float or base64")
 	}
@@ -134,7 +145,9 @@ func (d chatDefaults) present() bool {
 	return d.N != nil || d.Temperature != nil || d.TopP != nil || d.FrequencyPenalty != nil || d.PresencePenalty != nil ||
 		d.MaxCompletionTokens != nil || d.Stop != nil || d.Seed != nil || d.ParallelToolCalls != nil || d.ReasoningEffort != nil
 }
-func (d responsesDefaults) present() bool  { return d.MaxOutputTokens != nil }
+func (d responsesDefaults) present() bool {
+	return d.MaxOutputTokens != nil || d.Temperature != nil || d.TopP != nil || d.ParallelToolCalls != nil || d.ReasoningEffort != nil
+}
 func (d embeddingsDefaults) present() bool { return d.Dimensions != nil || d.EncodingFormat != nil }
 func (d imageGenerationDefaults) present() bool {
 	return d.N != nil || d.Size != nil || d.Quality != nil || d.ResponseFormat != nil
@@ -215,6 +228,23 @@ func (s *Snapshot) ApplyDefaults(modelID contract.ID, request contract.Request, 
 				request.MaxOutputTokens = defaultMaxOutputTokens
 			}
 		}
+		if request.Responses != nil {
+			responses := *request.Responses
+			request.Responses = &responses
+			if request.Responses.Temperature == nil {
+				request.Responses.Temperature = cloneFloat(defaults.Responses.Temperature)
+			}
+			if request.Responses.TopP == nil {
+				request.Responses.TopP = cloneFloat(defaults.Responses.TopP)
+			}
+			if request.Responses.ParallelToolCalls == nil && defaults.Responses.ParallelToolCalls != nil {
+				value := *defaults.Responses.ParallelToolCalls
+				request.Responses.ParallelToolCalls = &value
+			}
+			if request.Responses.ReasoningEffort == "" && defaults.Responses.ReasoningEffort != nil {
+				request.Responses.ReasoningEffort = *defaults.Responses.ReasoningEffort
+			}
+		}
 	case contract.OperationEmbeddings:
 		if request.Embeddings == nil {
 			return request, nil
@@ -269,4 +299,8 @@ func cloneFloat(value *float64) *float64 {
 	}
 	copy := *value
 	return &copy
+}
+
+func validDefaultRange(value *float64, minimum, maximum float64) bool {
+	return value == nil || (*value >= minimum && *value <= maximum)
 }

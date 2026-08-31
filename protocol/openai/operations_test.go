@@ -88,16 +88,32 @@ func TestResponsesRejectStateAndPreserveTypedInput(t *testing.T) {
 			t.Fatalf("stateful request was not explicitly rejected: %d %s", stateful.Code, stateful.Body.String())
 		}
 	}
-	body := `{"model":"allowed","instructions":"be concise","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"weather"},{"type":"input_image","image_url":"https://example.test/sky.png","detail":"low"}]},{"type":"function_call_output","call_id":"call_1","output":"sunny"}],"tools":[{"type":"function","name":"weather","parameters":{"type":"object"}}],"text":{"format":{"type":"json_schema","name":"forecast","schema":{"type":"object"}}},"max_output_tokens":20}`
+	body := `{"model":"allowed","instructions":"be concise","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"weather"},{"type":"input_image","image_url":"https://example.test/sky.png","detail":"low"}]},{"type":"function_call_output","call_id":"call_1","output":"sunny"}],"tools":[{"type":"function","name":"weather","parameters":{"type":"object"}}],"text":{"format":{"type":"json_schema","name":"forecast","schema":{"type":"object"}}},"temperature":0.4,"top_p":0.8,"parallel_tool_calls":false,"reasoning":{"effort":"low"},"max_output_tokens":20}`
 	response := perform(handler, http.MethodPost, "/v1/responses", body, "key")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
 	request := engine.invokeRequest
-	if request.Responses == nil || len(request.Responses.Input) != 2 || request.Responses.TextFormat.JSONSchema.Name != "forecast" || request.MaxOutputTokens != 20 {
+	if request.Responses == nil || len(request.Responses.Input) != 2 || request.Responses.TextFormat.JSONSchema.Name != "forecast" || request.MaxOutputTokens != 20 ||
+		request.Responses.Temperature == nil || *request.Responses.Temperature != 0.4 || request.Responses.TopP == nil || *request.Responses.TopP != 0.8 ||
+		request.Responses.ParallelToolCalls == nil || *request.Responses.ParallelToolCalls || request.Responses.ReasoningEffort != "low" {
 		t.Fatalf("canonical request = %#v", request)
 	}
 	assertJSONEqual(t, response.Body.String(), `{"id":"resp_1","model":"allowed","object":"response","output":[{"content":[{"annotations":[],"text":"sunny","type":"output_text"}],"id":"msg_1","role":"assistant","status":"completed","type":"message"}],"status":"completed","usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}`)
+}
+
+func TestResponsesRejectInvalidSamplingControls(t *testing.T) {
+	handler := testHandler(t, &fakeEngine{snapshot: testSnapshot(t)}, fakeAuthenticator{})
+	for _, body := range []string{
+		`{"model":"allowed","input":"hello","temperature":2.1}`,
+		`{"model":"allowed","input":"hello","top_p":-0.1}`,
+		`{"model":"allowed","input":"hello","reasoning":{"effort":"maximum"}}`,
+	} {
+		response := perform(handler, http.MethodPost, "/v1/responses", body, "key")
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("accepted invalid controls: status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
 }
 
 func TestResponsesStreamingUsesNamedSSEEvents(t *testing.T) {

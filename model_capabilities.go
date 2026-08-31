@@ -125,6 +125,12 @@ func requiredAdapterFeatures(request contract.Request) []string {
 		if request.Responses.TextFormat != nil && request.Responses.TextFormat.Type == "json_schema" {
 			add("json_schema")
 		}
+		if request.Responses.ParallelToolCalls != nil {
+			add("parallel_tools")
+		}
+		if request.Responses.ReasoningEffort != "" {
+			add("reasoning")
+		}
 	case contract.OperationEmbeddings:
 		if len(request.Embeddings.Input.Tokens) != 0 {
 			add("token_ids")

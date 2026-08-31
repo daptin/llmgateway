@@ -50,6 +50,10 @@
         "tool_choice": "translated",
         "text.format": "translated",
         "max_output_tokens": "translated",
+        "temperature": "translated",
+        "top_p": "translated",
+        "parallel_tool_calls": "translated",
+        "reasoning.effort": "translated",
         "store": "rejected",
         "previous_response_id": "rejected"
       },

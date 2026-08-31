@@ -185,6 +185,18 @@ func encodeResponsesRequest(model string, request contract.Request) map[string]a
 	if request.MaxOutputTokens > 0 {
 		value["max_output_tokens"] = request.MaxOutputTokens
 	}
+	if responses.Temperature != nil {
+		value["temperature"] = *responses.Temperature
+	}
+	if responses.TopP != nil {
+		value["top_p"] = *responses.TopP
+	}
+	if responses.ParallelToolCalls != nil {
+		value["parallel_tool_calls"] = *responses.ParallelToolCalls
+	}
+	if responses.ReasoningEffort != "" {
+		value["reasoning"] = map[string]any{"effort": responses.ReasoningEffort}
+	}
 	return value
 }
 

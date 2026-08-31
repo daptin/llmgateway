@@ -52,6 +52,8 @@ func requestFieldNames(wire reflect.Type) []string {
 			name = "stream_options.include_usage"
 		case "text":
 			name = "text.format"
+		case "reasoning":
+			name = "reasoning.effort"
 		}
 		fields = append(fields, name)
 	}

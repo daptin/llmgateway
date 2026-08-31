@@ -13,16 +13,24 @@ import (
 )
 
 type responsesRequest struct {
-	Model              string          `json:"model"`
-	Input              json.RawMessage `json:"input"`
-	Instructions       string          `json:"instructions,omitempty"`
-	Stream             bool            `json:"stream,omitempty"`
-	Tools              []responseTool  `json:"tools,omitempty"`
-	ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
-	Text               *responseText   `json:"text,omitempty"`
-	MaxOutputTokens    *int64          `json:"max_output_tokens,omitempty"`
-	Store              *bool           `json:"store,omitempty"`
-	PreviousResponseID *string         `json:"previous_response_id,omitempty"`
+	Model              string             `json:"model"`
+	Input              json.RawMessage    `json:"input"`
+	Instructions       string             `json:"instructions,omitempty"`
+	Stream             bool               `json:"stream,omitempty"`
+	Tools              []responseTool     `json:"tools,omitempty"`
+	ToolChoice         json.RawMessage    `json:"tool_choice,omitempty"`
+	Text               *responseText      `json:"text,omitempty"`
+	MaxOutputTokens    *int64             `json:"max_output_tokens,omitempty"`
+	Store              *bool              `json:"store,omitempty"`
+	PreviousResponseID *string            `json:"previous_response_id,omitempty"`
+	Temperature        *float64           `json:"temperature,omitempty"`
+	TopP               *float64           `json:"top_p,omitempty"`
+	ParallelToolCalls  *bool              `json:"parallel_tool_calls,omitempty"`
+	Reasoning          *responseReasoning `json:"reasoning,omitempty"`
+}
+
+type responseReasoning struct {
+	Effort string `json:"effort"`
 }
 
 type responseText struct {
@@ -139,6 +147,22 @@ func (h *Handler) canonicalResponse(id contract.ID, wire responsesRequest, reque
 		if err != nil {
 			return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid text format", http.StatusBadRequest, false, err)
 		}
+	}
+	if wire.Temperature != nil && (*wire.Temperature < 0 || *wire.Temperature > 2) {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "temperature must be between 0 and 2", http.StatusBadRequest, false, nil)
+	}
+	if wire.TopP != nil && (*wire.TopP < 0 || *wire.TopP > 1) {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "top_p must be between 0 and 1", http.StatusBadRequest, false, nil)
+	}
+	canonical.Temperature = wire.Temperature
+	canonical.TopP = wire.TopP
+	canonical.ParallelToolCalls = wire.ParallelToolCalls
+	if wire.Reasoning != nil {
+		if wire.Reasoning.Effort != "none" && wire.Reasoning.Effort != "minimal" && wire.Reasoning.Effort != "low" && wire.Reasoning.Effort != "medium" &&
+			wire.Reasoning.Effort != "high" && wire.Reasoning.Effort != "xhigh" {
+			return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid reasoning effort", http.StatusBadRequest, false, nil)
+		}
+		canonical.ReasoningEffort = wire.Reasoning.Effort
 	}
 	return contract.Request{
 		ID: id, Operation: contract.OperationResponses, PublicModel: wire.Model, Stream: wire.Stream, MaxOutputTokens: maximum,

@@ -69,6 +69,13 @@ func (r Request) Validate() error {
 		if r.MaxOutputTokens < 1 {
 			return errors.New("responses maximum output tokens must be positive")
 		}
+		if !validOptionalRange(r.Responses.Temperature, 0, 2) || !validOptionalRange(r.Responses.TopP, 0, 1) {
+			return errors.New("responses sampling parameters are out of range")
+		}
+		if r.Responses.ReasoningEffort != "" && r.Responses.ReasoningEffort != "none" && r.Responses.ReasoningEffort != "minimal" &&
+			r.Responses.ReasoningEffort != "low" && r.Responses.ReasoningEffort != "medium" && r.Responses.ReasoningEffort != "high" && r.Responses.ReasoningEffort != "xhigh" {
+			return errors.New("invalid responses reasoning effort")
+		}
 	case OperationEmbeddings:
 		if r.Embeddings == nil || (len(r.Embeddings.Input.Texts) == 0 && len(r.Embeddings.Input.Tokens) == 0) {
 			return errors.New("embeddings request requires input")
