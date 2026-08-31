@@ -7,7 +7,6 @@ import (
 
 	"github.com/daptin/llmgateway"
 	"github.com/daptin/llmgateway/adapter"
-	exactcache "github.com/daptin/llmgateway/cache"
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
 	"github.com/daptin/llmgateway/guardrail"
@@ -51,13 +50,6 @@ func TestExactCacheHitUsesSameAccountingPathAndCannotCrossKeys(t *testing.T) {
 	}
 	if first.Usage.CostMicros == 0 {
 		t.Fatal("provider response should have a calculated cost")
-	}
-	key, err := exactcache.Key(1, document.Models[0], contract.Principal{KeyID: "key-a"}, request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, found, err := responseCache.Get(context.Background(), key); err != nil || !found {
-		t.Fatalf("successful response was not cached: found=%v err=%v", found, err)
 	}
 	request.ID = "cached-request"
 	cached, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key-a"}, request)

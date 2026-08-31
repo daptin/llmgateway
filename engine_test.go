@@ -34,6 +34,10 @@ func chatRequest(id string, stream bool) contract.Request {
 }
 
 func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, accounting *testkit.AccountingStore, sinks ...llmgateway.TelemetrySink) *llmgateway.Engine {
+	return newEngineForDocument(t, testDocument(), faultAdapter, accounting, sinks...)
+}
+
+func newEngineForDocument(t *testing.T, document catalog.Document, faultAdapter *testkit.FaultAdapter, accounting *testkit.AccountingStore, sinks ...llmgateway.TelemetrySink) *llmgateway.Engine {
 	t.Helper()
 	registry := adapter.NewRegistry()
 	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) {
@@ -47,7 +51,7 @@ func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, accounting *tes
 		telemetry = sinks[0]
 	}
 	engine, err := llmgateway.New(llmgateway.Dependencies{
-		Catalog: testkit.NewCatalogSource(testDocument()), Adapters: registry,
+		Catalog: testkit.NewCatalogSource(document), Adapters: registry,
 		Authorizer: testkit.AllowAuthorizer{}, Accounting: accounting, Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
 		Guardrails: guardrail.NewRegistry(), Telemetry: telemetry, Selector: testkit.NewSelector(0), Clock: clock,
 	}, llmgateway.Options{})
@@ -176,6 +180,38 @@ func TestInvokeConservativelySettlesMissingProviderUsage(t *testing.T) {
 	completion, ok := store.Completion(request.ID)
 	if !ok || completion.Usage != response.Usage || len(completion.Attempts) != 1 || completion.Attempts[0].Usage != response.Usage {
 		t.Fatalf("completion = %+v, present=%v", completion, ok)
+	}
+}
+
+func TestEngineAppliesCompiledDefaultsOnceBeforeRoutingAndAccounting(t *testing.T) {
+	document := testDocument()
+	document.Models[0].DefaultParameters = []byte(`{"chat":{"n":2,"temperature":0,"max_completion_tokens":6}}`)
+	provider := testkit.NewFaultAdapter(
+		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "response"}}},
+	)
+	engine := newEngineForDocument(t, document, provider, testkit.NewAccountingStore())
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	request := chatRequest("model-defaults", false)
+	request.Chat.N = 0
+	request.Chat.MaxCompletionTokens = 0
+	request.EstimatedUsage = contract.Usage{InputTokens: 3, TotalTokens: 3, Estimated: true}
+	response, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := provider.Requests()
+	if len(requests) != 1 || requests[0].Chat.N != 2 || requests[0].Chat.MaxCompletionTokens != 6 ||
+		requests[0].Chat.Temperature == nil || *requests[0].Chat.Temperature != 0 || requests[0].EstimatedUsage.OutputTokens != 12 {
+		t.Fatalf("upstream request = %+v", requests)
+	}
+	if request.Chat.N != 0 || request.Chat.MaxCompletionTokens != 0 {
+		t.Fatalf("caller request was mutated: %+v", request.Chat)
+	}
+	if response.Usage.TotalTokens != 15 || !response.Usage.Estimated {
+		t.Fatalf("settled usage = %+v", response.Usage)
 	}
 }
 

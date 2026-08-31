@@ -46,3 +46,25 @@ func tokenUsageEmpty(usage contract.Usage) bool {
 	return usage.InputTokens == 0 && usage.OutputTokens == 0 && usage.CacheReadTokens == 0 &&
 		usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0 && usage.TotalTokens == 0
 }
+
+func applyRequestExposure(request *contract.Request) error {
+	if request == nil {
+		return errors.New("request is required")
+	}
+	var output int64
+	switch request.Operation {
+	case contract.OperationChat:
+		if request.Chat == nil || request.Chat.N < 0 || request.Chat.MaxCompletionTokens < 0 ||
+			(request.Chat.N > 0 && request.Chat.MaxCompletionTokens > math.MaxInt64/int64(request.Chat.N)) {
+			return errors.New("chat output exposure overflows")
+		}
+		output = request.Chat.MaxCompletionTokens * int64(request.Chat.N)
+	case contract.OperationResponses:
+		output = request.MaxOutputTokens
+	}
+	if request.EstimatedUsage.OutputTokens < output {
+		request.EstimatedUsage.OutputTokens = output
+		request.EstimatedUsage.Estimated = true
+	}
+	return normalizeTokenTotal(&request.EstimatedUsage)
+}

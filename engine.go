@@ -37,21 +37,22 @@ type Dependencies struct {
 }
 
 type Options struct {
-	MaxAttempts         int
-	FinalizationTimeout time.Duration
-	BaseRetryDelay      time.Duration
-	MaxRetryDelay       time.Duration
-	CircuitFailures     int64
-	CircuitWindow       time.Duration
-	CircuitCooldown     time.Duration
-	CacheTTL            time.Duration
-	CacheTimeout        time.Duration
-	MaxCacheEntryBytes  int
-	FirstEventTimeout   time.Duration
-	StreamIdleTimeout   time.Duration
-	RequestTimeout      time.Duration
-	HealthProbeTimeout  time.Duration
-	HealthProbeWorkers  int
+	MaxAttempts            int
+	DefaultMaxOutputTokens int64
+	FinalizationTimeout    time.Duration
+	BaseRetryDelay         time.Duration
+	MaxRetryDelay          time.Duration
+	CircuitFailures        int64
+	CircuitWindow          time.Duration
+	CircuitCooldown        time.Duration
+	CacheTTL               time.Duration
+	CacheTimeout           time.Duration
+	MaxCacheEntryBytes     int
+	FirstEventTimeout      time.Duration
+	StreamIdleTimeout      time.Duration
+	RequestTimeout         time.Duration
+	HealthProbeTimeout     time.Duration
+	HealthProbeWorkers     int
 }
 
 type runtimeSnapshot struct {
@@ -69,41 +70,42 @@ func (r *runtimeSnapshot) Capabilities(providerID contract.ID) (adapter.Capabili
 }
 
 type Engine struct {
-	catalog             CatalogSource
-	secrets             SecretResolver
-	adapters            *adapter.Registry
-	authorizer          Authorizer
-	accounting          AccountingStore
-	counters            CounterStore
-	cache               ResponseCache
-	guardrails          *guardrail.Registry
-	telemetry           TelemetrySink
-	selector            Selector
-	clock               Clock
-	maxAttempts         int
-	finalizationTimeout time.Duration
-	baseRetryDelay      time.Duration
-	maxRetryDelay       time.Duration
-	circuitFailures     int64
-	circuitWindow       time.Duration
-	circuitCooldown     time.Duration
-	cacheTTL            time.Duration
-	cacheTimeout        time.Duration
-	maxCacheEntryBytes  int
-	firstEventTimeout   time.Duration
-	streamIdleTimeout   time.Duration
-	requestTimeout      time.Duration
-	healthProbeTimeout  time.Duration
-	healthProbeWorkers  int
-	snapshot            atomic.Pointer[runtimeSnapshot]
-	draining            atomic.Bool
-	reloadMu            sync.Mutex
-	statusMu            sync.RWMutex
-	rejectedRevision    uint64
-	reloadFailureStage  string
-	activeMu            sync.Mutex
-	activeRequests      int64
-	drained             chan struct{}
+	catalog                CatalogSource
+	secrets                SecretResolver
+	adapters               *adapter.Registry
+	authorizer             Authorizer
+	accounting             AccountingStore
+	counters               CounterStore
+	cache                  ResponseCache
+	guardrails             *guardrail.Registry
+	telemetry              TelemetrySink
+	selector               Selector
+	clock                  Clock
+	maxAttempts            int
+	defaultMaxOutputTokens int64
+	finalizationTimeout    time.Duration
+	baseRetryDelay         time.Duration
+	maxRetryDelay          time.Duration
+	circuitFailures        int64
+	circuitWindow          time.Duration
+	circuitCooldown        time.Duration
+	cacheTTL               time.Duration
+	cacheTimeout           time.Duration
+	maxCacheEntryBytes     int
+	firstEventTimeout      time.Duration
+	streamIdleTimeout      time.Duration
+	requestTimeout         time.Duration
+	healthProbeTimeout     time.Duration
+	healthProbeWorkers     int
+	snapshot               atomic.Pointer[runtimeSnapshot]
+	draining               atomic.Bool
+	reloadMu               sync.Mutex
+	statusMu               sync.RWMutex
+	rejectedRevision       uint64
+	reloadFailureStage     string
+	activeMu               sync.Mutex
+	activeRequests         int64
+	drained                chan struct{}
 }
 
 func New(dependencies Dependencies, options Options) (*Engine, error) {
@@ -115,6 +117,12 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 	}
 	if options.MaxAttempts == 0 {
 		options.MaxAttempts = 3
+	}
+	if options.DefaultMaxOutputTokens == 0 {
+		options.DefaultMaxOutputTokens = 4096
+	}
+	if options.DefaultMaxOutputTokens < 1 {
+		return nil, errors.New("default maximum output tokens must be positive")
 	}
 	if options.MaxAttempts < 1 || options.MaxAttempts > 12 {
 		return nil, errors.New("max attempts must be between 1 and 12")
@@ -190,7 +198,7 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 		catalog: dependencies.Catalog, secrets: dependencies.Secrets, adapters: dependencies.Adapters,
 		authorizer: dependencies.Authorizer, accounting: dependencies.Accounting, counters: dependencies.Counters, cache: dependencies.Cache,
 		guardrails: dependencies.Guardrails, telemetry: dependencies.Telemetry, selector: dependencies.Selector,
-		clock: dependencies.Clock, maxAttempts: options.MaxAttempts, finalizationTimeout: options.FinalizationTimeout,
+		clock: dependencies.Clock, maxAttempts: options.MaxAttempts, defaultMaxOutputTokens: options.DefaultMaxOutputTokens, finalizationTimeout: options.FinalizationTimeout,
 		baseRetryDelay: options.BaseRetryDelay, maxRetryDelay: options.MaxRetryDelay,
 		circuitFailures: options.CircuitFailures, circuitWindow: options.CircuitWindow, circuitCooldown: options.CircuitCooldown,
 		cacheTTL: options.CacheTTL, cacheTimeout: options.CacheTimeout, maxCacheEntryBytes: options.MaxCacheEntryBytes,
@@ -524,8 +532,8 @@ func (e *Engine) resolve(ctx context.Context, principal contract.Principal, requ
 	if err != nil {
 		return preparedRequest{}, err
 	}
-	if err := request.Validate(); err != nil {
-		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "invalid request", 400, false, err)
+	if request.ID == "" || request.PublicModel == "" || !request.Operation.Valid() {
+		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "invalid request", 400, false, errors.New("request id, model, and operation are required"))
 	}
 	if request.StartedAt.IsZero() {
 		request.StartedAt = e.clock.Now()
@@ -533,6 +541,16 @@ func (e *Engine) resolve(ctx context.Context, principal contract.Principal, requ
 	model, ok := runtime.catalog.ModelByName(request.PublicModel)
 	if !ok || !model.Enabled {
 		return preparedRequest{}, publicError(contract.ErrorModelNotFound, "model not found", 404, false, nil)
+	}
+	request, err = runtime.catalog.ApplyDefaults(model.ID, request, e.defaultMaxOutputTokens)
+	if err != nil {
+		return preparedRequest{}, publicError(contract.ErrorInternal, "failed to normalize model defaults", 500, false, err)
+	}
+	if err := applyRequestExposure(&request); err != nil {
+		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "request token exposure exceeds supported range", 400, false, err)
+	}
+	if err := request.Validate(); err != nil {
+		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "invalid request", 400, false, err)
 	}
 	if err := validateModelCapabilities(model, request); err != nil {
 		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "request uses a capability disabled for this model", 400, false, err)

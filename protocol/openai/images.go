@@ -59,17 +59,14 @@ func canonicalImage(id contract.ID, wire imageRequest, requestBytes int64) (cont
 	if strings.TrimSpace(wire.Model) == "" || strings.TrimSpace(wire.Prompt) == "" {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "model and prompt are required", http.StatusBadRequest, false, nil)
 	}
-	n := 1
+	var n int
 	if wire.N != nil {
 		n = *wire.N
 	}
-	if n < 1 || n > 10 {
+	if wire.N != nil && (n < 1 || n > 10) {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "n must be between 1 and 10", http.StatusBadRequest, false, nil)
 	}
-	if wire.ResponseFormat == "" {
-		wire.ResponseFormat = "url"
-	}
-	if wire.ResponseFormat != "url" && wire.ResponseFormat != "b64_json" {
+	if wire.ResponseFormat != "" && wire.ResponseFormat != "url" && wire.ResponseFormat != "b64_json" {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "response_format must be url or b64_json", http.StatusBadRequest, false, nil)
 	}
 	return contract.Request{

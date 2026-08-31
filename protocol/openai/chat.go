@@ -146,20 +146,20 @@ func (h *Handler) canonicalChat(id contract.ID, wire chatRequest, requestBytes i
 	if wire.MaxTokens != nil && wire.MaxCompletionTokens != nil {
 		return contract.Request{}, false, gatewayError(contract.ErrorInvalidRequest, "max_tokens and max_completion_tokens cannot both be set", http.StatusBadRequest, false, nil)
 	}
-	maximum := h.maxOutput
+	var maximum int64
 	if wire.MaxCompletionTokens != nil {
 		maximum = *wire.MaxCompletionTokens
 	} else if wire.MaxTokens != nil {
 		maximum = *wire.MaxTokens
 	}
-	if maximum < 1 {
+	if (wire.MaxCompletionTokens != nil || wire.MaxTokens != nil) && maximum < 1 {
 		return contract.Request{}, false, gatewayError(contract.ErrorInvalidRequest, "maximum output tokens must be positive", http.StatusBadRequest, false, nil)
 	}
-	n := 1
+	var n int
 	if wire.N != nil {
 		n = *wire.N
 	}
-	if n < 1 || n > 128 {
+	if wire.N != nil && (n < 1 || n > 128) {
 		return contract.Request{}, false, gatewayError(contract.ErrorInvalidRequest, "n must be between 1 and 128", http.StatusBadRequest, false, nil)
 	}
 	if wire.Temperature != nil && (*wire.Temperature < 0 || *wire.Temperature > 2) {

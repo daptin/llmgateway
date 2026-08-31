@@ -29,20 +29,18 @@ type Authenticator interface {
 }
 
 type Options struct {
-	MaxBodyBytes           int64
-	DefaultMaxOutputTokens int64
-	TotalRequestTimeout    time.Duration
-	NewRequestID           func() (contract.ID, error)
+	MaxBodyBytes        int64
+	TotalRequestTimeout time.Duration
+	NewRequestID        func() (contract.ID, error)
 }
 
 type Handler struct {
-	engine    Engine
-	auth      Authenticator
-	maxBody   int64
-	maxOutput int64
-	timeout   time.Duration
-	newID     func() (contract.ID, error)
-	mux       *http.ServeMux
+	engine  Engine
+	auth    Authenticator
+	maxBody int64
+	timeout time.Duration
+	newID   func() (contract.ID, error)
+	mux     *http.ServeMux
 }
 
 func NewHandler(engine Engine, authenticator Authenticator, options Options) (*Handler, error) {
@@ -52,19 +50,16 @@ func NewHandler(engine Engine, authenticator Authenticator, options Options) (*H
 	if options.MaxBodyBytes == 0 {
 		options.MaxBodyBytes = 16 << 20
 	}
-	if options.DefaultMaxOutputTokens == 0 {
-		options.DefaultMaxOutputTokens = 4096
-	}
 	if options.TotalRequestTimeout == 0 {
 		options.TotalRequestTimeout = 2 * time.Minute
 	}
-	if options.MaxBodyBytes < 1 || options.DefaultMaxOutputTokens < 1 || options.TotalRequestTimeout < 0 {
+	if options.MaxBodyBytes < 1 || options.TotalRequestTimeout < 0 {
 		return nil, errors.New("handler bounds must be positive")
 	}
 	if options.NewRequestID == nil {
 		options.NewRequestID = randomRequestID
 	}
-	handler := &Handler{engine: engine, auth: authenticator, maxBody: options.MaxBodyBytes, maxOutput: options.DefaultMaxOutputTokens, timeout: options.TotalRequestTimeout, newID: options.NewRequestID, mux: http.NewServeMux()}
+	handler := &Handler{engine: engine, auth: authenticator, maxBody: options.MaxBodyBytes, timeout: options.TotalRequestTimeout, newID: options.NewRequestID, mux: http.NewServeMux()}
 	handler.mux.HandleFunc("POST /v1/chat/completions", handler.chatCompletions)
 	handler.mux.HandleFunc("POST /v1/responses", handler.responses)
 	handler.mux.HandleFunc("POST /v1/embeddings", handler.embeddings)

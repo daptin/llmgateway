@@ -112,11 +112,11 @@ func (h *Handler) canonicalResponse(id contract.ID, wire responsesRequest, reque
 	if (wire.Store != nil && *wire.Store) || wire.PreviousResponseID != "" {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "stateful responses are not supported", http.StatusBadRequest, false, nil)
 	}
-	maximum := h.maxOutput
+	var maximum int64
 	if wire.MaxOutputTokens != nil {
 		maximum = *wire.MaxOutputTokens
 	}
-	if maximum < 1 {
+	if wire.MaxOutputTokens != nil && maximum < 1 {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "max_output_tokens must be positive", http.StatusBadRequest, false, nil)
 	}
 	input, err := convertResponseInput(wire.Input)

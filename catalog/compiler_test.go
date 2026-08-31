@@ -74,7 +74,9 @@ func TestCompileRejectsAcceptedLookingButUnimplementedModelConfiguration(t *test
 		{name: "routing strategy", mutate: func(model *Model) { model.RoutingStrategy = "least_busy" }},
 		{name: "parameter drop", mutate: func(model *Model) { model.UnsupportedParameterPolicy = "drop" }},
 		{name: "parameter passthrough", mutate: func(model *Model) { model.UnsupportedParameterPolicy = "passthrough" }},
-		{name: "defaults", mutate: func(model *Model) { model.DefaultParameters = []byte(`{"temperature":0}`) }},
+		{name: "unknown default", mutate: func(model *Model) { model.DefaultParameters = []byte(`{"chat":{"magic":true}}`) }},
+		{name: "zero default", mutate: func(model *Model) { model.DefaultParameters = []byte(`{"chat":{"n":0}}`) }},
+		{name: "undeclared operation default", mutate: func(model *Model) { model.DefaultParameters = []byte(`{"embeddings":{"encoding_format":"float"}}`) }},
 		{name: "unknown capability", mutate: func(model *Model) { model.Capabilities = map[string]bool{"magic": true} }},
 		{name: "public cache without exact cache", mutate: func(model *Model) { model.Capabilities = map[string]bool{"public_cache": true} }},
 	}
@@ -86,6 +88,32 @@ func TestCompileRejectsAcceptedLookingButUnimplementedModelConfiguration(t *test
 				t.Fatal("expected catalog rejection")
 			}
 		})
+	}
+}
+
+func TestCompiledDefaultsNormalizeWithoutMutatingCaller(t *testing.T) {
+	document := validDocument()
+	document.Models[0].DefaultParameters = []byte(`{"chat":{"n":2,"temperature":0,"max_completion_tokens":32,"stop":["done"]}}`)
+	snapshot, err := Compile(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := contract.Request{Operation: contract.OperationChat, Chat: &contract.ChatRequest{}}
+	normalized, err := snapshot.ApplyDefaults("model-1", request, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if request.Chat.N != 0 || normalized.Chat.N != 2 || normalized.Chat.MaxCompletionTokens != 32 ||
+		normalized.MaxOutputTokens != 32 || normalized.Chat.Temperature == nil || *normalized.Chat.Temperature != 0 || len(normalized.Chat.Stop) != 1 {
+		t.Fatalf("request=%+v normalized=%+v", request, normalized)
+	}
+	explicit := contract.Request{Operation: contract.OperationChat, Chat: &contract.ChatRequest{N: 1, MaxCompletionTokens: 7}}
+	normalized, err = snapshot.ApplyDefaults("model-1", explicit, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if normalized.Chat.N != 1 || normalized.Chat.MaxCompletionTokens != 7 || normalized.MaxOutputTokens != 7 {
+		t.Fatalf("explicit request was overwritten: %+v", normalized)
 	}
 }
 

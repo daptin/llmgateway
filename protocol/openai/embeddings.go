@@ -64,10 +64,7 @@ func canonicalEmbeddings(id contract.ID, wire embeddingsRequest, requestBytes in
 	if wire.Dimensions < 0 {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "dimensions cannot be negative", http.StatusBadRequest, false, nil)
 	}
-	if wire.EncodingFormat == "" {
-		wire.EncodingFormat = "float"
-	}
-	if wire.EncodingFormat != "float" && wire.EncodingFormat != "base64" {
+	if wire.EncodingFormat != "" && wire.EncodingFormat != "float" && wire.EncodingFormat != "base64" {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "encoding_format must be float or base64", http.StatusBadRequest, false, nil)
 	}
 	input, err := decodeEmbeddingInput(wire.Input)

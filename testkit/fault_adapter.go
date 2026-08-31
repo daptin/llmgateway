@@ -26,6 +26,7 @@ type FaultAdapter struct {
 	steps        []AdapterStep
 	next         int
 	attempts     []contract.ID
+	requests     []contract.Request
 }
 
 func NewFaultAdapter(capabilities adapter.Capabilities, steps ...AdapterStep) *FaultAdapter {
@@ -34,11 +35,11 @@ func NewFaultAdapter(capabilities adapter.Capabilities, steps ...AdapterStep) *F
 
 func (a *FaultAdapter) Capabilities() adapter.Capabilities { return a.capabilities }
 
-func (a *FaultAdapter) Invoke(ctx context.Context, deployment catalog.Deployment, _ contract.Request) (contract.Response, error) {
+func (a *FaultAdapter) Invoke(ctx context.Context, deployment catalog.Deployment, request contract.Request) (contract.Response, error) {
 	if err := ctx.Err(); err != nil {
 		return contract.Response{}, err
 	}
-	step, err := a.take(deployment.ID)
+	step, err := a.take(deployment.ID, request)
 	if err != nil {
 		return contract.Response{}, err
 	}
@@ -48,11 +49,11 @@ func (a *FaultAdapter) Invoke(ctx context.Context, deployment catalog.Deployment
 	return step.Response, nil
 }
 
-func (a *FaultAdapter) Stream(ctx context.Context, deployment catalog.Deployment, _ contract.Request) (adapter.Stream, error) {
+func (a *FaultAdapter) Stream(ctx context.Context, deployment catalog.Deployment, request contract.Request) (adapter.Stream, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	step, err := a.take(deployment.ID)
+	step, err := a.take(deployment.ID, request)
 	if err != nil {
 		return nil, err
 	}
@@ -68,10 +69,17 @@ func (a *FaultAdapter) Attempts() []contract.ID {
 	return append([]contract.ID(nil), a.attempts...)
 }
 
-func (a *FaultAdapter) take(deploymentID contract.ID) (AdapterStep, error) {
+func (a *FaultAdapter) Requests() []contract.Request {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]contract.Request(nil), a.requests...)
+}
+
+func (a *FaultAdapter) take(deploymentID contract.ID, request contract.Request) (AdapterStep, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.attempts = append(a.attempts, deploymentID)
+	a.requests = append(a.requests, request)
 	if a.next >= len(a.steps) {
 		return AdapterStep{}, errors.New("fault adapter script exhausted")
 	}

@@ -14,10 +14,27 @@ The compatibility surface is declared in `compatibility/manifest.json`. An
 endpoint or provider is supported only when its manifest entry is backed by its
 conformance suite.
 
-The verified provider surface is currently the strict OpenAI-compatible
-adapter. Named services are certified separately against the live-provider
-matrix before they are added to the manifest; the presence of a compatible
-URL alone is not treated as certification.
+The current manifest is a target contract, not a verified parity claim. Named
+services become certified only after their live-provider and conformance gates
+pass; the presence of a compatible URL alone is not certification.
+
+Model defaults are compiled once with the catalog and use operation-scoped JSON
+so fields with similar names cannot collide:
+
+```json
+{
+  "chat": {"temperature": 0, "max_completion_tokens": 512},
+  "responses": {"max_output_tokens": 512},
+  "embeddings": {"encoding_format": "float"},
+  "image_generation": {"n": 1, "response_format": "b64_json"}
+}
+```
+
+Unknown, invalid, or undeclared-operation defaults reject the whole snapshot.
+Explicit request values always take precedence. Only the
+`priority_weighted` routing strategy and `reject` unsupported-parameter policy
+are currently accepted; other values fail catalog compilation instead of being
+silently ignored.
 
 ## Development
 

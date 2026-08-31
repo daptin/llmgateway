@@ -1,8 +1,6 @@
 package catalog
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -22,6 +20,7 @@ type Snapshot struct {
 	byModel     map[contract.ID][]contract.ID
 	policies    map[contract.ID]Policy
 	guardrails  map[contract.ID]Guardrail
+	defaults    map[contract.ID]modelDefaults
 }
 
 func Compile(doc Document) (*Snapshot, error) {
@@ -33,6 +32,7 @@ func Compile(doc Document) (*Snapshot, error) {
 		models: make(map[contract.ID]Model), modelByName: make(map[string]contract.ID),
 		deployments: make(map[contract.ID]Deployment), byModel: make(map[contract.ID][]contract.ID),
 		policies: make(map[contract.ID]Policy), guardrails: make(map[contract.ID]Guardrail),
+		defaults: make(map[contract.ID]modelDefaults),
 	}
 	for _, provider := range doc.Providers {
 		if err := validateProvider(provider); err != nil {
@@ -60,6 +60,10 @@ func Compile(doc Document) (*Snapshot, error) {
 		if err := validateModel(model); err != nil {
 			return nil, err
 		}
+		defaults, err := parseModelDefaults(model)
+		if err != nil {
+			return nil, err
+		}
 		if _, exists := s.models[model.ID]; exists {
 			return nil, fmt.Errorf("duplicate model id %q", model.ID)
 		}
@@ -72,6 +76,7 @@ func Compile(doc Document) (*Snapshot, error) {
 			}
 		}
 		s.models[model.ID] = cloneModel(model)
+		s.defaults[model.ID] = defaults
 		s.modelByName[model.Name] = model.ID
 	}
 	if err := validateFallbacks(s.models); err != nil {
@@ -278,9 +283,6 @@ func validateModel(model Model) error {
 	if err := validateModelCapabilities(model); err != nil {
 		return err
 	}
-	if err := validateEmptyModelDefaults(model); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -296,21 +298,6 @@ func validateModelCapabilities(model Model) error {
 	}
 	if model.Capabilities["public_cache"] && !model.Capabilities["exact_cache"] {
 		return fmt.Errorf("model %q public_cache requires exact_cache", model.ID)
-	}
-	return nil
-}
-
-func validateEmptyModelDefaults(model Model) error {
-	raw := bytes.TrimSpace(model.DefaultParameters)
-	if len(raw) == 0 {
-		return nil
-	}
-	var defaults map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &defaults); err != nil || defaults == nil {
-		return fmt.Errorf("model %q default parameters must be a JSON object", model.ID)
-	}
-	if len(defaults) != 0 {
-		return fmt.Errorf("model %q default parameters are not supported by this compatibility release", model.ID)
 	}
 	return nil
 }
