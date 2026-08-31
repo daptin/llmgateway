@@ -157,6 +157,16 @@ func nextProviderEvent(ctx context.Context, stream adapter.Stream) (event contra
 	return stream.Next(ctx)
 }
 
+func nextProviderEventWithin(ctx context.Context, stream adapter.Stream, timeout time.Duration, message string) (contract.StreamEvent, error) {
+	nextContext, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	event, err := nextProviderEvent(nextContext, stream)
+	if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+		return contract.StreamEvent{}, publicError(contract.ErrorTimeout, message, 504, true, err)
+	}
+	return event, err
+}
+
 func closeProviderStream(stream adapter.Stream) (err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {

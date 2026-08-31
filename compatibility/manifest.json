@@ -1,6 +1,6 @@
 {
   "version": "2026-08-31",
-  "kind": "target",
+  "kind": "verified",
   "comparison": {
     "litellm": "1.98.0",
     "openai": {
@@ -73,14 +73,7 @@
     {"method": "GET", "path": "/v1/models/{id}", "fields": {}}
   ],
   "providers": [
-    {"name": "openai", "operations": {"chat": "native", "responses": "native", "embeddings": "native", "image_generation": "native"}},
-    {"name": "azure-openai", "operations": {"chat": "translated", "responses": "translated", "embeddings": "translated", "image_generation": "translated"}},
-    {"name": "anthropic", "operations": {"chat": "translated", "responses": "translated"}},
-    {"name": "gemini", "operations": {"chat": "translated", "responses": "translated", "embeddings": "translated", "image_generation": "translated"}},
-    {"name": "vertex", "operations": {"chat": "translated", "responses": "translated", "embeddings": "translated", "image_generation": "translated"}},
-    {"name": "bedrock", "operations": {"chat": "translated", "responses": "translated", "embeddings": "translated"}},
-    {"name": "ollama", "operations": {"chat": "translated", "embeddings": "translated"}},
-    {"name": "openai-compatible", "operations": {"chat": "passthrough", "embeddings": "passthrough", "image_generation": "passthrough"}}
+    {"name": "openai-compatible", "operations": {"chat": "translated", "responses": "translated", "embeddings": "translated", "image_generation": "translated"}}
   ],
   "error_codes": [
     "invalid_request",

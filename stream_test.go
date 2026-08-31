@@ -15,17 +15,21 @@ import (
 	"github.com/daptin/llmgateway/testkit"
 )
 
-func streamEngine(t *testing.T, document catalog.Document, fault *testkit.FaultAdapter, store *testkit.AccountingStore) *llmgateway.Engine {
+func streamEngine(t *testing.T, document catalog.Document, provider adapter.Adapter, store *testkit.AccountingStore, options ...llmgateway.Options) *llmgateway.Engine {
 	t.Helper()
 	registry := adapter.NewRegistry()
-	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) { return fault, nil })); err != nil {
+	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) { return provider, nil })); err != nil {
 		t.Fatal(err)
 	}
 	clock := testkit.NewAutoClock(time.Now())
+	configured := llmgateway.Options{}
+	if len(options) == 1 {
+		configured = options[0]
+	}
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(document), Adapters: registry, Authorizer: testkit.AllowAuthorizer{},
 		Accounting: store, Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
-	}, llmgateway.Options{})
+	}, configured)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,6 +38,30 @@ func streamEngine(t *testing.T, document catalog.Document, fault *testkit.FaultA
 	}
 	return engine
 }
+
+type waitingAdapter struct{ first bool }
+
+func (waitingAdapter) Capabilities() adapter.Capabilities {
+	return adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}}
+}
+func (waitingAdapter) Invoke(context.Context, catalog.Deployment, contract.Request) (contract.Response, error) {
+	return contract.Response{}, errors.New("not implemented")
+}
+func (a waitingAdapter) Stream(context.Context, catalog.Deployment, contract.Request) (adapter.Stream, error) {
+	return &waitingStream{first: a.first}, nil
+}
+
+type waitingStream struct{ first bool }
+
+func (s *waitingStream) Next(ctx context.Context) (contract.StreamEvent, error) {
+	if s.first {
+		s.first = false
+		return contract.StreamEvent{Type: "content_delta", Chat: &contract.ChatDelta{Content: "first"}}, nil
+	}
+	<-ctx.Done()
+	return contract.StreamEvent{}, ctx.Err()
+}
+func (*waitingStream) Close() error { return nil }
 
 func TestStreamRetriesBeforeFirstEvent(t *testing.T) {
 	document := testDocument()
@@ -60,6 +88,53 @@ func TestStreamRetriesBeforeFirstEvent(t *testing.T) {
 	}
 	if attempts := fault.Attempts(); len(attempts) != 2 || attempts[0] == attempts[1] {
 		t.Fatalf("expected pre-commit failover, got %v", attempts)
+	}
+}
+
+func TestStreamFirstEventTimeoutFinalizesWithoutCommit(t *testing.T) {
+	store := testkit.NewAccountingStore()
+	_, err := streamEngine(t, testDocument(), waitingAdapter{}, store, llmgateway.Options{FirstEventTimeout: 10 * time.Millisecond}).Stream(
+		context.Background(), contract.Principal{}, chatRequest("first-timeout", true))
+	var gatewayError *contract.Error
+	if !errors.As(err, &gatewayError) || gatewayError.Code != contract.ErrorTimeout || gatewayError.HTTPStatus != 504 {
+		t.Fatalf("timeout error=%v", err)
+	}
+	if store.State("first-timeout") != "finalized" {
+		t.Fatalf("state=%s", store.State("first-timeout"))
+	}
+}
+
+func TestLogicalRequestDeadlineCoversStreamSetup(t *testing.T) {
+	store := testkit.NewAccountingStore()
+	_, err := streamEngine(t, testDocument(), waitingAdapter{}, store, llmgateway.Options{
+		RequestTimeout: 10 * time.Millisecond, FirstEventTimeout: time.Second,
+	}).Stream(context.Background(), contract.Principal{}, chatRequest("request-timeout", true))
+	var gatewayError *contract.Error
+	if !errors.As(err, &gatewayError) || gatewayError.Code != contract.ErrorTimeout || gatewayError.HTTPStatus != 504 {
+		t.Fatalf("request timeout error=%v", err)
+	}
+	if store.State("request-timeout") != "finalized" {
+		t.Fatalf("state=%s", store.State("request-timeout"))
+	}
+}
+
+func TestStreamIdleTimeoutTerminatesAfterCommit(t *testing.T) {
+	store := testkit.NewAccountingStore()
+	stream, err := streamEngine(t, testDocument(), waitingAdapter{first: true}, store, llmgateway.Options{StreamIdleTimeout: 10 * time.Millisecond}).Stream(
+		context.Background(), contract.Principal{}, chatRequest("idle-timeout", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if event, err := stream.Next(context.Background()); err != nil || !event.OutputCommitted {
+		t.Fatalf("first event=%+v err=%v", event, err)
+	}
+	_, err = stream.Next(context.Background())
+	var gatewayError *contract.Error
+	if !errors.As(err, &gatewayError) || gatewayError.Code != contract.ErrorTimeout || gatewayError.HTTPStatus != 504 {
+		t.Fatalf("idle error=%v", err)
+	}
+	if store.State("idle-timeout") != "finalized" {
+		t.Fatalf("state=%s", store.State("idle-timeout"))
 	}
 }
 

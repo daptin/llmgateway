@@ -47,6 +47,9 @@ type Options struct {
 	CacheTTL            time.Duration
 	CacheTimeout        time.Duration
 	MaxCacheEntryBytes  int
+	FirstEventTimeout   time.Duration
+	StreamIdleTimeout   time.Duration
+	RequestTimeout      time.Duration
 }
 
 type runtimeSnapshot struct {
@@ -85,6 +88,9 @@ type Engine struct {
 	cacheTTL            time.Duration
 	cacheTimeout        time.Duration
 	maxCacheEntryBytes  int
+	firstEventTimeout   time.Duration
+	streamIdleTimeout   time.Duration
+	requestTimeout      time.Duration
 	snapshot            atomic.Pointer[runtimeSnapshot]
 	draining            atomic.Bool
 	reloadMu            sync.Mutex
@@ -148,6 +154,21 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 	if options.CacheTTL < 0 || options.CacheTimeout < 1 || options.MaxCacheEntryBytes < 1 {
 		return nil, errors.New("cache TTL and entry bound must be positive")
 	}
+	if options.FirstEventTimeout == 0 {
+		options.FirstEventTimeout = 30 * time.Second
+	}
+	if options.StreamIdleTimeout == 0 {
+		options.StreamIdleTimeout = 60 * time.Second
+	}
+	if options.FirstEventTimeout < time.Millisecond || options.StreamIdleTimeout < time.Millisecond {
+		return nil, errors.New("stream first-event and idle timeouts must be positive")
+	}
+	if options.RequestTimeout == 0 {
+		options.RequestTimeout = 120 * time.Second
+	}
+	if options.RequestTimeout < time.Millisecond {
+		return nil, errors.New("request timeout must be positive")
+	}
 	dependencies.Adapters.Freeze()
 	dependencies.Guardrails.Freeze()
 	drained := make(chan struct{})
@@ -160,7 +181,9 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 		baseRetryDelay: options.BaseRetryDelay, maxRetryDelay: options.MaxRetryDelay,
 		circuitFailures: options.CircuitFailures, circuitWindow: options.CircuitWindow, circuitCooldown: options.CircuitCooldown,
 		cacheTTL: options.CacheTTL, cacheTimeout: options.CacheTimeout, maxCacheEntryBytes: options.MaxCacheEntryBytes,
-		drained: drained,
+		firstEventTimeout: options.FirstEventTimeout, streamIdleTimeout: options.StreamIdleTimeout,
+		requestTimeout: options.RequestTimeout,
+		drained:        drained,
 	}, nil
 }
 
@@ -331,6 +354,8 @@ func (e *Engine) Drain(ctx context.Context) error {
 }
 
 func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, request contract.Request) (contract.Response, error) {
+	ctx, cancelRequest := context.WithTimeout(ctx, e.requestTimeout)
+	defer cancelRequest()
 	if !e.beginRequest() {
 		return contract.Response{}, ErrDraining
 	}
@@ -644,6 +669,12 @@ func normalizeError(err error, fallback contract.ErrorCode, status int, retryabl
 	var gatewayError *contract.Error
 	if errors.As(err, &gatewayError) {
 		return gatewayError.Safe()
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return publicError(contract.ErrorTimeout, "request timed out", 504, true, err)
+	}
+	if errors.Is(err, context.Canceled) {
+		return publicError(contract.ErrorProvider, "request cancelled", 499, false, err)
 	}
 	return publicError(fallback, safeMessage(fallback), status, retryable, err)
 }

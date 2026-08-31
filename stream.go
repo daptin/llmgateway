@@ -26,21 +26,26 @@ type GatewayStream struct {
 	firstByteAt  time.Time
 	usage        contract.Usage
 	lease        attemptLease
+	idleTimeout  time.Duration
 	committed    bool
 	terminal     bool
 	done         func()
+	cancel       context.CancelFunc
 	doneOnce     sync.Once
 }
 
 type EventStream = contract.EventStream
 
 func (e *Engine) Stream(ctx context.Context, principal contract.Principal, request contract.Request) (EventStream, error) {
+	ctx, cancelRequest := context.WithTimeout(ctx, e.requestTimeout)
 	if !e.beginRequest() {
+		cancelRequest()
 		return nil, ErrDraining
 	}
 	released := false
 	defer func() {
 		if !released {
+			cancelRequest()
 			e.endRequest()
 		}
 	}()
@@ -95,7 +100,7 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 			}
 			continue
 		}
-		first, firstErr := nextProviderEvent(ctx, upstream)
+		first, firstErr := nextProviderEventWithin(ctx, upstream, e.firstEventTimeout, "upstream first event timed out")
 		if firstErr != nil {
 			_ = closeProviderStream(upstream)
 			normalized := normalizeError(firstErr, contract.ErrorProvider, 502, false)
@@ -126,7 +131,8 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 		stream := &GatewayStream{
 			engine: e, prepared: prepared, route: routeAttempt, upstream: upstream, first: &first,
 			attempts: attempts, attemptIndex: index + 1, attemptStart: started, firstByteAt: firstAt,
-			lease: lease, done: e.endRequest,
+			lease: lease, done: e.endRequest, cancel: cancelRequest,
+			idleTimeout: e.streamIdleTimeout,
 		}
 		if first.Usage != nil {
 			stream.usage = *first.Usage
@@ -166,7 +172,7 @@ func (s *GatewayStream) Next(ctx context.Context) (contract.StreamEvent, error) 
 		}
 		return event, nil
 	}
-	event, err := nextProviderEvent(ctx, s.upstream)
+	event, err := nextProviderEventWithin(ctx, s.upstream, s.idleTimeout, "upstream stream became idle")
 	if event.Usage != nil {
 		s.usage = *event.Usage
 	}
@@ -272,6 +278,9 @@ func (s *GatewayStream) finishLocked(ctx context.Context, status string, httpSta
 
 func (s *GatewayStream) releaseRequest() {
 	s.doneOnce.Do(func() {
+		if s.cancel != nil {
+			s.cancel()
+		}
 		if s.done != nil {
 			s.done()
 		}

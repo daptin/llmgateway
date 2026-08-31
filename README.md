@@ -14,6 +14,11 @@ The compatibility surface is declared in `compatibility/manifest.json`. An
 endpoint or provider is supported only when its manifest entry is backed by its
 conformance suite.
 
+The verified provider surface is currently the strict OpenAI-compatible
+adapter. Named services are certified separately against the live-provider
+matrix before they are added to the manifest; the presence of a compatible
+URL alone is not treated as certification.
+
 ## Development
 
 ```sh

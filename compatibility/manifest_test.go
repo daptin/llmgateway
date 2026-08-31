@@ -13,6 +13,9 @@ func TestDefaultManifestIsValid(t *testing.T) {
 	if len(manifest.Endpoints) != 6 {
 		t.Fatalf("expected 6 endpoints, got %d", len(manifest.Endpoints))
 	}
+	if manifest.Kind != "verified" || len(manifest.Providers) != 1 || manifest.Providers[0].Name != "openai-compatible" {
+		t.Fatalf("manifest overstates implemented provider coverage: %+v", manifest.Providers)
+	}
 }
 
 func TestDecodeRejectsUnknownFields(t *testing.T) {
