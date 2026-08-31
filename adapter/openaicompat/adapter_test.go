@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -101,7 +103,7 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 		case "/v1/embeddings":
 			_, _ = io.WriteString(response, `{"model":"m","data":[{"index":0,"embedding":[0.1,0.2]}],"usage":{"prompt_tokens":2,"total_tokens":2}}`)
 		case "/v1/images":
-			_, _ = io.WriteString(response, `{"created":9,"data":[{"b64_json":"AAAA"}]}`)
+			_, _ = io.WriteString(response, `{"created":9,"data":[{"b64_json":"AAAA"}],"usage":{"prompt_tokens":3,"completion_tokens":7,"total_tokens":10}}`)
 		default:
 			http.NotFound(response, request)
 		}
@@ -120,7 +122,7 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 			return value.Embeddings != nil && len(value.Embeddings.Data[0].Vector) == 2
 		}},
 		{name: "images", request: contract.Request{Operation: contract.OperationImageGeneration, ImageGeneration: &contract.ImageGenerationRequest{Prompt: "cat", N: 1, ResponseFormat: "b64_json"}}, check: func(value contract.Response) bool {
-			return value.ImageGeneration != nil && value.ImageGeneration.Data[0].Base64 == "AAAA"
+			return value.ImageGeneration != nil && value.ImageGeneration.Data[0].Base64 == "AAAA" && value.Usage.TotalTokens == 10
 		}},
 	}
 	for _, test := range tests {
@@ -133,6 +135,38 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 				t.Fatalf("unexpected result: %#v", result)
 			}
 		})
+	}
+}
+
+func TestProviderRedirectsAreNotFollowed(t *testing.T) {
+	var redirected atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		redirected.Add(1)
+	}))
+	defer target.Close()
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		http.Redirect(response, &http.Request{}, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	adapter := buildAdapter(t, server, `{}`, Factory{})
+	_, err := adapter.Invoke(context.Background(), deployment(), contract.Request{Operation: contract.OperationEmbeddings,
+		Embeddings: &contract.EmbeddingsRequest{Input: contract.EmbeddingInput{Texts: []string{"hi"}}}})
+	if err == nil || redirected.Load() != 0 {
+		t.Fatalf("redirect error=%v followed=%d", err, redirected.Load())
+	}
+}
+
+func TestPrivateIPRejectsCarrierGradeNATAndMulticast(t *testing.T) {
+	for _, value := range []string{"100.64.0.1", "100.127.255.254", "224.0.0.1", "ff02::1"} {
+		if !privateIP(net.ParseIP(value)) {
+			t.Fatalf("%s was not classified as private", value)
+		}
+	}
+}
+
+func TestRetryAfterSaturatesWithoutOverflow(t *testing.T) {
+	if got := retryAfter("9223372036854775807", time.Now()); got != time.Duration(1<<63-1) {
+		t.Fatalf("retry-after duration = %s", got)
 	}
 }
 

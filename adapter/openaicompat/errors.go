@@ -66,6 +66,9 @@ func retryAfter(value string, now time.Time) time.Duration {
 		if seconds <= 0 {
 			return 0
 		}
+		if seconds > int64((1<<63-1)/time.Second) {
+			return time.Duration(1<<63 - 1)
+		}
 		return time.Duration(seconds) * time.Second
 	}
 	when, err := http.ParseTime(value)

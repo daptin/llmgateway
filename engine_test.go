@@ -21,7 +21,7 @@ func testDocument() catalog.Document {
 	return catalog.Document{
 		Revision:    1,
 		Providers:   []catalog.Provider{{ID: "p", Name: "provider", Type: "test", Enabled: true}},
-		Models:      []catalog.Model{{ID: "m", Name: "model", Operations: []contract.Operation{contract.OperationChat}, UnsupportedParameterPolicy: "reject", Enabled: true}},
+		Models:      []catalog.Model{{ID: "m", Name: "model", Operations: []contract.Operation{contract.OperationChat}, RoutingStrategy: "priority_weighted", UnsupportedParameterPolicy: "reject", Enabled: true}},
 		Deployments: []catalog.Deployment{{ID: "d", Name: "deployment", ProviderID: "p", ModelID: "m", UpstreamModel: "upstream", Operations: []contract.Operation{contract.OperationChat}, Weight: 1, MaxConcurrency: -1, RPM: -1, TPM: -1, Enabled: true}},
 	}
 }
@@ -117,6 +117,50 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 		t.Fatalf("expected ErrDraining, got %v", err)
 	}
 	assertReadyStatus(t, handler, http.StatusServiceUnavailable)
+}
+
+func TestInvokeConservativelySettlesMissingProviderUsage(t *testing.T) {
+	provider := testkit.NewFaultAdapter(
+		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "response"}}},
+	)
+	store := testkit.NewAccountingStore()
+	engine := newEngine(t, provider, store)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	request := chatRequest("missing-usage", false)
+	request.EstimatedUsage = contract.Usage{InputTokens: 7, OutputTokens: 11, TotalTokens: 18, Estimated: true}
+	response, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Usage.TotalTokens != 18 || !response.Usage.Estimated {
+		t.Fatalf("usage = %+v", response.Usage)
+	}
+	completion, ok := store.Completion(request.ID)
+	if !ok || completion.Usage != response.Usage || len(completion.Attempts) != 1 || completion.Attempts[0].Usage != response.Usage {
+		t.Fatalf("completion = %+v, present=%v", completion, ok)
+	}
+}
+
+func TestInvokeRejectsModelCapabilityBeforeAdmission(t *testing.T) {
+	provider := testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})
+	store := testkit.NewAccountingStore()
+	engine := newEngine(t, provider, store)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	request := chatRequest("unsupported-tools", false)
+	request.Chat.Tools = []contract.Tool{{Type: "function", Function: contract.FunctionDefinition{Name: "lookup", Parameters: []byte(`{"type":"object"}`)}}}
+	_, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, request)
+	var public *contract.Error
+	if !errors.As(err, &public) || public.Code != contract.ErrorInvalidRequest || public.HTTPStatus != http.StatusBadRequest {
+		t.Fatalf("error = %v", err)
+	}
+	if state := store.State(request.ID); state != "" {
+		t.Fatalf("unsupported request reached accounting: %s", state)
+	}
 }
 
 func TestTerminalTelemetryHasStableSafeDimensions(t *testing.T) {

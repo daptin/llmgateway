@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/daptin/llmgateway/accounting"
 	"github.com/daptin/llmgateway/adapter"
 	"github.com/daptin/llmgateway/contract"
 	"github.com/daptin/llmgateway/internal/routing"
@@ -134,9 +133,7 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 			lease: lease, done: e.endRequest, cancel: cancelRequest,
 			idleTimeout: e.streamIdleTimeout,
 		}
-		if first.Usage != nil {
-			stream.usage = *first.Usage
-		}
+		stream.observeUsage(first.Usage)
 		transferred = true
 		released = true
 		return stream, nil
@@ -173,9 +170,7 @@ func (s *GatewayStream) Next(ctx context.Context) (contract.StreamEvent, error) 
 		return event, nil
 	}
 	event, err := nextProviderEventWithin(ctx, s.upstream, s.idleTimeout, "upstream stream became idle")
-	if event.Usage != nil {
-		s.usage = *event.Usage
-	}
+	s.observeUsage(event.Usage)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
 			if finishErr := s.finishLocked(ctx, "succeeded", 200, "", false); finishErr != nil {
@@ -205,6 +200,13 @@ func (s *GatewayStream) Next(ctx context.Context) (contract.StreamEvent, error) 
 	return event, nil
 }
 
+func (s *GatewayStream) observeUsage(usage *contract.Usage) {
+	if usage == nil || (tokenUsageEmpty(*usage) && !tokenUsageEmpty(s.usage)) {
+		return
+	}
+	s.usage = *usage
+}
+
 func (s *GatewayStream) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -216,13 +218,18 @@ func (s *GatewayStream) Close(ctx context.Context) error {
 	closeErr := closeProviderStream(s.upstream)
 	s.engine.releaseAttemptLease(ctx, s.lease)
 	ended := s.engine.clock.Now()
+	usage, usageErr := settledUsage(s.usage, s.prepared.request.EstimatedUsage, s.route.Deployment.Pricing)
+	if usageErr != nil {
+		usage = s.prepared.request.EstimatedUsage
+		usage.Estimated = true
+	}
 	attempt := contract.Attempt{
 		Number: s.attemptIndex, ProviderID: s.route.Provider.ID, DeploymentID: s.route.Deployment.ID,
 		StartedAt: s.attemptStart, FirstByteAt: s.firstByteAt, EndedAt: ended, Outcome: "cancelled",
-		OutputCommitted: s.committed, Usage: s.usage,
+		OutputCommitted: s.committed, Usage: usage,
 	}
 	s.attempts = append(s.attempts, attempt)
-	err := s.engine.cancelPrepared(ctx, s.prepared, contract.Cancellation{Token: s.prepared.token, Reason: "stream_closed", Usage: s.usage, Attempts: s.attempts, EndedAt: ended})
+	err := s.engine.cancelPrepared(ctx, s.prepared, contract.Cancellation{Token: s.prepared.token, Reason: "stream_closed", Usage: usage, Attempts: s.attempts, EndedAt: ended})
 	s.terminal = true
 	if err != nil {
 		return err
@@ -233,18 +240,13 @@ func (s *GatewayStream) Close(ctx context.Context) error {
 func (s *GatewayStream) finishLocked(ctx context.Context, status string, httpStatus int, code contract.ErrorCode, retryable bool) error {
 	defer s.releaseRequest()
 	ended := s.engine.clock.Now()
-	usage := s.usage
-	if usage.TotalTokens == 0 {
-		usage.TotalTokens = usage.InputTokens + usage.OutputTokens
-	}
-	cost, err := accounting.CostMicros(usage, s.route.Deployment.Pricing)
-	if err != nil || !usage.Valid() {
+	usage, usageErr := settledUsage(s.usage, s.prepared.request.EstimatedUsage, s.route.Deployment.Pricing)
+	if usageErr != nil || !usage.Valid() {
 		status = "failed"
 		httpStatus = 502
 		code = contract.ErrorProvider
 		usage = contract.Usage{}
 	}
-	usage.CostMicros = cost
 	closeErr := closeProviderStream(s.upstream)
 	if closeErr != nil && status == "succeeded" {
 		status = "failed"

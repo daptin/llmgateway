@@ -92,6 +92,7 @@ type imagesResponseWire struct {
 		Base64        string `json:"b64_json"`
 		RevisedPrompt string `json:"revised_prompt"`
 	} `json:"data"`
+	Usage usageWire `json:"usage"`
 }
 
 func decodeResponse(operation contract.Operation, payload []byte) (contract.Response, error) {
@@ -158,7 +159,7 @@ func decodeResponse(operation contract.Operation, payload []byte) (contract.Resp
 		if err := json.Unmarshal(payload, &wire); err != nil || len(wire.Data) == 0 {
 			return contract.Response{}, providerFailure("upstream returned an invalid image response", err)
 		}
-		result := contract.Response{ImageGeneration: &contract.ImageGenerationResponse{Created: wire.Created}}
+		result := contract.Response{ImageGeneration: &contract.ImageGenerationResponse{Created: wire.Created}, Usage: canonicalUsage(wire.Usage)}
 		for _, item := range wire.Data {
 			if item.URL == "" && item.Base64 == "" {
 				return contract.Response{}, providerFailure("upstream image has no content", nil)

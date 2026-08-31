@@ -19,7 +19,7 @@ func main() {
 		Providers: []catalog.Provider{{ID: "provider", Name: "example", Type: "openai", Enabled: true}},
 		Models: []catalog.Model{{
 			ID: "model", Name: "example-model", Operations: []contract.Operation{contract.OperationChat},
-			UnsupportedParameterPolicy: "reject", Enabled: true,
+			RoutingStrategy: "priority_weighted", UnsupportedParameterPolicy: "reject", Enabled: true,
 		}},
 		Deployments: []catalog.Deployment{{
 			ID: "deployment", Name: "example", ModelID: "model", ProviderID: "provider",

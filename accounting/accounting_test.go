@@ -61,3 +61,18 @@ func TestReservationsRejectDuplicateEffectiveLimit(t *testing.T) {
 		t.Fatal("expected duplicate effective limit error")
 	}
 }
+
+func TestReservationsDoNotEnforceSoftLimits(t *testing.T) {
+	policy := catalog.Policy{ID: "p", Limits: []catalog.Limit{
+		{Metric: "requests", Window: "1m", Maximum: 1, Mode: "soft"},
+		{Metric: "total_tokens", Window: "1m", Maximum: 10, Mode: "hard"},
+	}}
+	reservations, err := Reservations([]Binding{{ScopeKind: "key", ScopeID: "k", Policy: policy}},
+		Measures{Requests: 1, TotalTokens: 4}, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(reservations) != 1 || reservations[0].Metric != "total_tokens" {
+		t.Fatalf("reservations = %+v", reservations)
+	}
+}

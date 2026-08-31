@@ -77,6 +77,11 @@ func Build(snapshot *catalog.Snapshot, publicModel string, operation contract.Op
 }
 
 func attemptsForModel(snapshot *catalog.Snapshot, model catalog.Model, operation contract.Operation, capabilities CapabilitySource, selector Selector) []Attempt {
+	// Catalog compilation rejects every other strategy. Keeping the dispatch
+	// here makes routing_strategy an executable contract instead of inert data.
+	if model.RoutingStrategy != "priority_weighted" {
+		return nil
+	}
 	tiers := make(map[int][]Attempt)
 	priorities := make([]int, 0)
 	for _, deployment := range snapshot.DeploymentsForModel(model.ID) {

@@ -30,7 +30,9 @@
         {"name":"embedding-array","feature":"embedding_array","model":"openai/text-embedding-3-small"},
         {"name":"embedding-tokens","feature":"embedding_tokens","model":"openai/text-embedding-3-small"},
         {"name":"embedding-token-arrays","feature":"embedding_token_arrays","model":"openai/text-embedding-3-small"},
-        {"name":"image","feature":"image","model":"openai/gpt-image-1"}
+        {"name":"responses","feature":"responses","model":"openai/gpt-4o"},
+        {"name":"responses-stream","feature":"responses_stream","model":"openai/gpt-4o"},
+        {"name":"image","feature":"image","model":"bytedance-seed/seedream-4.5"}
       ]
     },
     {

@@ -27,8 +27,8 @@ func routingSnapshot(t *testing.T) *catalog.Snapshot {
 			{ID: "p3", Name: "three", Type: "test", Enabled: true},
 		},
 		Models: []catalog.Model{
-			{ID: "m1", Name: "public", Operations: []contract.Operation{contract.OperationChat}, FallbackModelIDs: []contract.ID{"m2"}, UnsupportedParameterPolicy: "reject", Enabled: true},
-			{ID: "m2", Name: "fallback", Operations: []contract.Operation{contract.OperationChat}, UnsupportedParameterPolicy: "reject", Enabled: true},
+			{ID: "m1", Name: "public", Operations: []contract.Operation{contract.OperationChat}, RoutingStrategy: "priority_weighted", FallbackModelIDs: []contract.ID{"m2"}, UnsupportedParameterPolicy: "reject", Enabled: true},
+			{ID: "m2", Name: "fallback", Operations: []contract.Operation{contract.OperationChat}, RoutingStrategy: "priority_weighted", UnsupportedParameterPolicy: "reject", Enabled: true},
 		},
 		Deployments: []catalog.Deployment{
 			{ID: "d1", Name: "one", ModelID: "m1", ProviderID: "p1", UpstreamModel: "a", Operations: []contract.Operation{contract.OperationChat}, Priority: 0, Weight: 1, MaxConcurrency: -1, RPM: -1, TPM: -1, Enabled: true},

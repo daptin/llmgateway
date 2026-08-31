@@ -39,6 +39,9 @@ func Reservations(bindings []Binding, measures Measures, now time.Time) ([]contr
 			return nil, errors.New("policy binding scope and policy identifiers are required")
 		}
 		for _, limit := range binding.Policy.Limits {
+			if limit.Mode == "soft" {
+				continue
+			}
 			amount, err := metricValue(limit.Metric, measures)
 			if err != nil {
 				return nil, fmt.Errorf("policy %q: %w", binding.Policy.ID, err)

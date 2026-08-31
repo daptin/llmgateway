@@ -95,8 +95,14 @@ func (f Factory) Build(_ context.Context, provider catalog.Provider, secret adap
 	if transport == nil {
 		transport = http.DefaultTransport.(*http.Transport).Clone()
 	}
+	client := f.Client
+	if client != nil {
+		copy := *client
+		copy.CheckRedirect = rejectRedirect
+		client = &copy
+	}
 	return &Adapter{
-		baseURL: parsed, apiKey: key, parameters: parameters, client: f.Client, transport: transport,
+		baseURL: parsed, apiKey: key, parameters: parameters, client: client, transport: transport,
 		maxResponseBytes: maximum, maxEventBytes: frameMaximum, now: f.Now, allowPrivate: provider.AllowPrivateNetwork,
 		clients: make(map[time.Duration]*http.Client),
 	}, nil
@@ -253,9 +259,13 @@ func (a *Adapter) clientFor(connectTimeout time.Duration) *http.Client {
 		}
 		transport = clone
 	}
-	client := &http.Client{Transport: transport}
+	client := &http.Client{Transport: transport, CheckRedirect: rejectRedirect}
 	a.clients[connectTimeout] = client
 	return client
+}
+
+func rejectRedirect(_ *http.Request, _ []*http.Request) error {
+	return http.ErrUseLastResponse
 }
 
 func safeDialContext(timeout time.Duration, allowPrivate bool) func(context.Context, string, string) (net.Conn, error) {
@@ -300,7 +310,9 @@ func privateHost(host string) bool {
 }
 
 func privateIP(ip net.IP) bool {
-	return ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast()
+	carrierGradeNAT := len(ip) > 0 && ip.To4() != nil && ip.To4()[0] == 100 && ip.To4()[1]&0xc0 == 0x40
+	return !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified() ||
+		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || carrierGradeNAT
 }
 
 func readBounded(reader io.Reader, maximum int64) ([]byte, error) {

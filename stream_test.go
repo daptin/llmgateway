@@ -181,3 +181,30 @@ func TestStreamCloseCancelsAccounting(t *testing.T) {
 		t.Fatalf("state=%s", store.State("request"))
 	}
 }
+
+func TestStreamConservativelySettlesMissingProviderUsage(t *testing.T) {
+	fault := testkit.NewFaultAdapter(
+		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		testkit.AdapterStep{Events: []contract.StreamEvent{
+			{Type: "content_delta", Chat: &contract.ChatDelta{Content: "complete"}},
+			{Type: "finish", Terminal: true},
+		}},
+	)
+	store := testkit.NewAccountingStore()
+	request := chatRequest("stream-missing-usage", true)
+	request.EstimatedUsage = contract.Usage{InputTokens: 5, OutputTokens: 13, TotalTokens: 18, Estimated: true}
+	stream, err := streamEngine(t, testDocument(), fault, store).Stream(context.Background(), contract.Principal{}, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	completion, ok := store.Completion(request.ID)
+	if !ok || completion.Usage.TotalTokens != 18 || !completion.Usage.Estimated || len(completion.Attempts) != 1 || completion.Attempts[0].Usage != completion.Usage {
+		t.Fatalf("completion = %+v, present=%v", completion, ok)
+	}
+}

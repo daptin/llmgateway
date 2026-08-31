@@ -464,20 +464,15 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 			}
 			continue
 		}
-		usage := response.Usage
-		if usage.TotalTokens == 0 {
-			usage.TotalTokens = usage.InputTokens + usage.OutputTokens
-		}
-		cost, costErr := accounting.CostMicros(usage, routeAttempt.Deployment.Pricing)
-		if costErr != nil || !usage.Valid() {
-			normalized := publicError(contract.ErrorProvider, "provider returned invalid usage", 502, false, costErr)
+		usage, usageErr := settledUsage(response.Usage, prepared.request.EstimatedUsage, routeAttempt.Deployment.Pricing)
+		if usageErr != nil || !usage.Valid() {
+			normalized := publicError(contract.ErrorProvider, "provider returned invalid usage", 502, false, usageErr)
 			attempts = append(attempts, contract.Attempt{Number: index + 1, ProviderID: routeAttempt.Provider.ID, DeploymentID: routeAttempt.Deployment.ID, StartedAt: started, EndedAt: ended, Outcome: "failed", ErrorCode: normalized.Code, HTTPStatus: normalized.HTTPStatus})
 			if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: 502, ErrorCode: normalized.Code, Attempts: attempts, EndedAt: ended}); finishErr != nil {
 				return contract.Response{}, finishErr
 			}
 			return contract.Response{}, normalized
 		}
-		usage.CostMicros = cost
 		response.RequestID = prepared.request.ID
 		response.Model = prepared.request.PublicModel
 		response.Usage = usage
@@ -530,6 +525,9 @@ func (e *Engine) resolve(ctx context.Context, principal contract.Principal, requ
 	if !ok || !model.Enabled {
 		return preparedRequest{}, publicError(contract.ErrorModelNotFound, "model not found", 404, false, nil)
 	}
+	if err := validateModelCapabilities(model, request); err != nil {
+		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "request uses a capability disabled for this model", 400, false, err)
+	}
 	if err := e.authorizer.Authorize(ctx, principal, model); err != nil {
 		return preparedRequest{}, normalizeError(err, contract.ErrorPermission, 403, false)
 	}
@@ -553,10 +551,7 @@ func (e *Engine) admit(ctx context.Context, principal contract.Principal, prepar
 		plan.Attempts = plan.Attempts[:e.maxAttempts]
 	}
 	estimate := prepared.request.EstimatedUsage
-	if estimate.TotalTokens == 0 {
-		estimate.TotalTokens = estimate.InputTokens + estimate.OutputTokens
-	}
-	if !estimate.Valid() {
+	if normalizeErr := normalizeTokenTotal(&estimate); normalizeErr != nil || !estimate.Valid() {
 		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "invalid usage estimate", 400, false, nil)
 	}
 	for _, routeAttempt := range plan.Attempts {

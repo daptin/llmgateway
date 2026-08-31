@@ -1,6 +1,8 @@
 package catalog
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
@@ -267,10 +269,48 @@ func validateModel(model Model) error {
 			return fmt.Errorf("model %q has invalid operation %q", model.ID, operation)
 		}
 	}
-	switch model.UnsupportedParameterPolicy {
-	case "reject", "drop", "passthrough":
-	default:
-		return fmt.Errorf("model %q has invalid unsupported parameter policy %q", model.ID, model.UnsupportedParameterPolicy)
+	if model.RoutingStrategy != "priority_weighted" {
+		return fmt.Errorf("model %q has unsupported routing strategy %q", model.ID, model.RoutingStrategy)
+	}
+	if model.UnsupportedParameterPolicy != "reject" {
+		return fmt.Errorf("model %q has unsupported parameter policy %q", model.ID, model.UnsupportedParameterPolicy)
+	}
+	if err := validateModelCapabilities(model); err != nil {
+		return err
+	}
+	if err := validateEmptyModelDefaults(model); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateModelCapabilities(model Model) error {
+	allowed := map[string]struct{}{
+		"audio": {}, "dimensions": {}, "exact_cache": {}, "json_schema": {}, "logprobs": {},
+		"public_cache": {}, "token_ids": {}, "tools": {}, "vision": {},
+	}
+	for capability := range model.Capabilities {
+		if _, ok := allowed[capability]; !ok {
+			return fmt.Errorf("model %q has unknown capability %q", model.ID, capability)
+		}
+	}
+	if model.Capabilities["public_cache"] && !model.Capabilities["exact_cache"] {
+		return fmt.Errorf("model %q public_cache requires exact_cache", model.ID)
+	}
+	return nil
+}
+
+func validateEmptyModelDefaults(model Model) error {
+	raw := bytes.TrimSpace(model.DefaultParameters)
+	if len(raw) == 0 {
+		return nil
+	}
+	var defaults map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &defaults); err != nil || defaults == nil {
+		return fmt.Errorf("model %q default parameters must be a JSON object", model.ID)
+	}
+	if len(defaults) != 0 {
+		return fmt.Errorf("model %q default parameters are not supported by this compatibility release", model.ID)
 	}
 	return nil
 }

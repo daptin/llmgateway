@@ -78,8 +78,8 @@ func testSnapshot(t *testing.T) *catalog.Snapshot {
 	snapshot, err := catalog.Compile(catalog.Document{
 		Revision: 1,
 		Models: []catalog.Model{
-			{ID: "model-allowed", Name: "allowed", Operations: []contract.Operation{contract.OperationChat}, UnsupportedParameterPolicy: "reject", Enabled: true},
-			{ID: "model-denied", Name: "denied", Operations: []contract.Operation{contract.OperationChat}, UnsupportedParameterPolicy: "reject", Enabled: true},
+			{ID: "model-allowed", Name: "allowed", Operations: []contract.Operation{contract.OperationChat}, RoutingStrategy: "priority_weighted", UnsupportedParameterPolicy: "reject", Enabled: true},
+			{ID: "model-denied", Name: "denied", Operations: []contract.Operation{contract.OperationChat}, RoutingStrategy: "priority_weighted", UnsupportedParameterPolicy: "reject", Enabled: true},
 		},
 	})
 	if err != nil {
