@@ -1,0 +1,54 @@
+{
+  "providers": [
+    {
+      "name": "google",
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "api_key_env": "GOOGLE_API_KEY",
+      "cases": [
+        {"name":"chat","feature":"chat","model":"gemini-3.7-flash"},
+        {"name":"chat-stream","feature":"chat_stream","model":"gemini-3.7-flash"},
+        {"name":"tools","feature":"chat_tools","model":"gemini-3.7-flash"},
+        {"name":"structured","feature":"chat_structured","model":"gemini-3.7-flash"},
+        {"name":"vision","feature":"chat_vision","model":"gemini-3.7-flash"},
+        {"name":"embedding-string","feature":"embedding_string","model":"gemini-embedding-001"},
+        {"name":"embedding-array","feature":"embedding_array","model":"gemini-embedding-001"},
+        {"name":"image","feature":"image","model":"gemini-2.5-flash-image"}
+      ]
+    },
+    {
+      "name": "openrouter",
+      "base_url": "https://openrouter.ai/api/v1",
+      "api_key_env": "OPENROUTER_API_KEY",
+      "provider_parameters": {"image_generation_path":"/images"},
+      "cases": [
+        {"name":"chat","feature":"chat","model":"openai/gpt-4o-mini"},
+        {"name":"chat-stream","feature":"chat_stream","model":"openai/gpt-4o-mini"},
+        {"name":"tools","feature":"chat_tools","model":"openai/gpt-4o-mini"},
+        {"name":"structured","feature":"chat_structured","model":"openai/gpt-4o-mini"},
+        {"name":"vision","feature":"chat_vision","model":"openai/gpt-4o-mini"},
+        {"name":"embedding-string","feature":"embedding_string","model":"openai/text-embedding-3-small"},
+        {"name":"embedding-array","feature":"embedding_array","model":"openai/text-embedding-3-small"},
+        {"name":"embedding-tokens","feature":"embedding_tokens","model":"openai/text-embedding-3-small"},
+        {"name":"embedding-token-arrays","feature":"embedding_token_arrays","model":"openai/text-embedding-3-small"},
+        {"name":"image","feature":"image","model":"openai/gpt-image-1"}
+      ]
+    },
+    {
+      "name": "lilac",
+      "base_url": "https://api.getlilac.com/v1",
+      "api_key_env": "LILAC_API_KEY",
+      "cases": [
+        {"name":"kimi-chat","feature":"chat","model":"moonshotai/kimi-k2.6"},
+        {"name":"glm-chat","feature":"chat","model":"zai-org/glm-5.2"},
+        {"name":"gemma-chat","feature":"chat","model":"google/gemma-4-31b-it"},
+        {"name":"minimax-chat","feature":"chat","model":"minimaxai/minimax-m3"},
+        {"name":"chat-stream","feature":"chat_stream","model":"moonshotai/kimi-k2.6"},
+        {"name":"tools","feature":"chat_tools","model":"moonshotai/kimi-k2.6"},
+        {"name":"structured","feature":"chat_structured","model":"moonshotai/kimi-k2.6"},
+        {"name":"vision","feature":"chat_vision","model":"moonshotai/kimi-k2.6"},
+        {"name":"responses","feature":"responses","model":"moonshotai/kimi-k2.6"},
+        {"name":"responses-stream","feature":"responses_stream","model":"moonshotai/kimi-k2.6"}
+      ]
+    }
+  ]
+}

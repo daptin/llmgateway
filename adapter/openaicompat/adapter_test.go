@@ -68,7 +68,15 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 		response.Header().Set("Content-Type", "application/json")
 		switch request.URL.Path {
 		case "/v1/responses":
-			_, _ = io.WriteString(response, `{"id":"resp_1","model":"m","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`)
+			var body map[string]any
+			if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+				t.Fatal(err)
+			}
+			tool := body["tools"].([]any)[0].(map[string]any)
+			if tool["name"] != "weather" || tool["function"] != nil {
+				t.Fatalf("Responses tool was not flat: %#v", tool)
+			}
+			_, _ = io.WriteString(response, `{"id":"resp_1","model":"m","status":"completed","output":[{"type":"reasoning","id":"reason_1","status":"completed","summary":[{"type":"summary_text","text":"brief"}]},{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`)
 		case "/v1/embeddings":
 			_, _ = io.WriteString(response, `{"model":"m","data":[{"index":0,"embedding":[0.1,0.2]}],"usage":{"prompt_tokens":2,"total_tokens":2}}`)
 		case "/v1/images":
@@ -84,8 +92,8 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 		request contract.Request
 		check   func(contract.Response) bool
 	}{
-		{name: "responses", request: contract.Request{Operation: contract.OperationResponses, Responses: &contract.ResponsesRequest{Input: []contract.ResponseInputItem{{Type: "message", Role: "user", Content: []contract.ContentPart{{Type: "input_text", Text: "hi"}}}}}}, check: func(value contract.Response) bool {
-			return value.Responses != nil && value.Responses.Output[0].Content[0].Text == "hello"
+		{name: "responses", request: contract.Request{Operation: contract.OperationResponses, Responses: &contract.ResponsesRequest{Input: []contract.ResponseInputItem{{Type: "message", Role: "user", Content: []contract.ContentPart{{Type: "input_text", Text: "hi"}}}}, Tools: []contract.Tool{{Type: "function", Function: contract.FunctionDefinition{Name: "weather", Parameters: json.RawMessage(`{"type":"object"}`)}}}}}, check: func(value contract.Response) bool {
+			return value.Responses != nil && value.Responses.Output[0].Summary[0].Text == "brief" && value.Responses.Output[1].Content[0].Text == "hello"
 		}},
 		{name: "embeddings", request: contract.Request{Operation: contract.OperationEmbeddings, Embeddings: &contract.EmbeddingsRequest{Input: contract.EmbeddingInput{Texts: []string{"hi"}}, EncodingFormat: "float"}}, check: func(value contract.Response) bool {
 			return value.Embeddings != nil && len(value.Embeddings.Data[0].Vector) == 2

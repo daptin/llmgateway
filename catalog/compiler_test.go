@@ -16,7 +16,9 @@ func validDocument() Document {
 }
 
 func TestCompileAndLookupReturnsCopies(t *testing.T) {
-	snapshot, err := Compile(validDocument())
+	document := validDocument()
+	document.Models[0].Capabilities = map[string]bool{"tools": true}
+	snapshot, err := Compile(document)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,6 +30,14 @@ func TestCompileAndLookupReturnsCopies(t *testing.T) {
 	again, _ := snapshot.ModelByName("public-model")
 	if again.Operations[0] != contract.OperationChat {
 		t.Fatal("snapshot leaked mutable model state")
+	}
+	if !again.Capabilities["tools"] {
+		t.Fatal("snapshot dropped model capabilities")
+	}
+	model.Capabilities["tools"] = false
+	again, _ = snapshot.ModelByName("public-model")
+	if !again.Capabilities["tools"] {
+		t.Fatal("snapshot leaked mutable capability state")
 	}
 	deployments := snapshot.DeploymentsForModel("model-1")
 	deployments[0].Operations[0] = contract.OperationEmbeddings

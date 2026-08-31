@@ -45,6 +45,15 @@ type ResponseCache interface {
 	Delete(context.Context, string) error
 }
 
+// DisabledResponseCache is an explicit cache opt-out.
+type DisabledResponseCache struct{}
+
+func (DisabledResponseCache) Get(context.Context, string) ([]byte, bool, error) {
+	return nil, false, nil
+}
+func (DisabledResponseCache) Set(context.Context, string, []byte, time.Duration) error { return nil }
+func (DisabledResponseCache) Delete(context.Context, string) error                     { return nil }
+
 type TelemetryEvent struct {
 	Name       string
 	RequestID  contract.ID
@@ -56,6 +65,12 @@ type TelemetryEvent struct {
 type TelemetrySink interface {
 	Record(context.Context, TelemetryEvent)
 }
+
+// DiscardTelemetrySink is an explicit opt-out for hosts that do not emit
+// gateway telemetry.
+type DiscardTelemetrySink struct{}
+
+func (DiscardTelemetrySink) Record(context.Context, TelemetryEvent) {}
 
 type Clock interface {
 	Now() time.Time

@@ -11,6 +11,7 @@ import (
 	"github.com/daptin/llmgateway/adapter"
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
+	"github.com/daptin/llmgateway/guardrail"
 	"github.com/daptin/llmgateway/testkit"
 )
 
@@ -23,7 +24,7 @@ func streamEngine(t *testing.T, document catalog.Document, fault *testkit.FaultA
 	clock := testkit.NewAutoClock(time.Now())
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(document), Adapters: registry, Authorizer: testkit.AllowAuthorizer{},
-		Accounting: store, Counters: testkit.NewCounterStore(clock.Now), Selector: testkit.NewSelector(0), Clock: clock,
+		Accounting: store, Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
 	}, llmgateway.Options{})
 	if err != nil {
 		t.Fatal(err)

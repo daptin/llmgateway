@@ -162,10 +162,10 @@ func encodeResponsesRequest(model string, request contract.Request) map[string]a
 		value["instructions"] = responses.Instructions
 	}
 	if len(responses.Tools) > 0 {
-		value["tools"] = encodeTools(responses.Tools)
+		value["tools"] = encodeResponseTools(responses.Tools)
 	}
 	if responses.ToolChoice != nil {
-		value["tool_choice"] = encodeToolChoice(*responses.ToolChoice)
+		value["tool_choice"] = encodeResponseToolChoice(*responses.ToolChoice)
 	}
 	if responses.TextFormat != nil {
 		value["text"] = map[string]any{"format": encodeResponseTextFormat(*responses.TextFormat)}
@@ -174,6 +174,28 @@ func encodeResponsesRequest(model string, request contract.Request) map[string]a
 		value["max_output_tokens"] = request.MaxOutputTokens
 	}
 	return value
+}
+
+func encodeResponseTools(tools []contract.Tool) []map[string]any {
+	result := make([]map[string]any, 0, len(tools))
+	for _, tool := range tools {
+		value := map[string]any{"type": tool.Type, "name": tool.Function.Name, "parameters": json.RawMessage(tool.Function.Parameters)}
+		if tool.Function.Description != "" {
+			value["description"] = tool.Function.Description
+		}
+		if tool.Function.Strict != nil {
+			value["strict"] = *tool.Function.Strict
+		}
+		result = append(result, value)
+	}
+	return result
+}
+
+func encodeResponseToolChoice(choice contract.ToolChoice) any {
+	if choice.Mode != "function" {
+		return choice.Mode
+	}
+	return map[string]any{"type": "function", "name": choice.FunctionName}
 }
 
 func encodeResponseInput(items []contract.ResponseInputItem) []map[string]any {

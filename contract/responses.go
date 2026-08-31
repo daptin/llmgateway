@@ -31,6 +31,7 @@ type ResponseOutputItem struct {
 	ID        string
 	Role      string
 	Content   []ContentPart
+	Summary   []ContentPart
 	CallID    string
 	Name      string
 	Arguments string

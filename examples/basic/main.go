@@ -9,6 +9,7 @@ import (
 	"github.com/daptin/llmgateway/adapter"
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
+	"github.com/daptin/llmgateway/guardrail"
 	"github.com/daptin/llmgateway/testkit"
 )
 
@@ -35,8 +36,8 @@ func main() {
 	clock := llmgateway.SystemClock{}
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(document), Adapters: registry,
-		Authorizer: testkit.AllowAuthorizer{}, Accounting: testkit.NewAccountingStore(), Counters: testkit.NewCounterStore(clock.Now),
-		Selector: testkit.NewSelector(0), Clock: clock,
+		Authorizer: testkit.AllowAuthorizer{}, Accounting: testkit.NewAccountingStore(), Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
+		Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
 	}, llmgateway.Options{})
 	if err != nil {
 		log.Fatal(err)

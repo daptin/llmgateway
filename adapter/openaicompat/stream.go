@@ -223,6 +223,10 @@ func decodeResponseOutputItem(raw json.RawMessage) (contract.ResponseOutputItem,
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
+		Summary []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"summary"`
 	}
 	if err := json.Unmarshal(raw, &wire); err != nil {
 		return contract.ResponseOutputItem{}, err
@@ -233,6 +237,9 @@ func decodeResponseOutputItem(raw json.RawMessage) (contract.ResponseOutputItem,
 	item := contract.ResponseOutputItem{Type: wire.Type, ID: wire.ID, Role: wire.Role, Status: wire.Status, CallID: wire.CallID, Name: wire.Name, Arguments: wire.Arguments}
 	for _, content := range wire.Content {
 		item.Content = append(item.Content, contract.ContentPart{Type: content.Type, Text: content.Text})
+	}
+	for _, summary := range wire.Summary {
+		item.Summary = append(item.Summary, contract.ContentPart{Type: summary.Type, Text: summary.Text})
 	}
 	return item, nil
 }

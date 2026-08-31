@@ -141,6 +141,13 @@ func (s *GatewayStream) Next(ctx context.Context) (contract.StreamEvent, error) 
 	if s.first != nil {
 		event := *s.first
 		s.first = nil
+		if guardrailErr := s.engine.checkStream(ctx, s.prepared, event); guardrailErr != nil {
+			normalized := normalizeError(guardrailErr, contract.ErrorPermission, 400, false)
+			if finishErr := s.finishLocked(ctx, "rejected", normalized.HTTPStatus, normalized.Code, false); finishErr != nil {
+				return contract.StreamEvent{}, finishErr
+			}
+			return contract.StreamEvent{}, normalized
+		}
 		s.committed = true
 		event.OutputCommitted = true
 		if event.Terminal {
@@ -163,6 +170,13 @@ func (s *GatewayStream) Next(ctx context.Context) (contract.StreamEvent, error) 
 		}
 		normalized := normalizeError(err, contract.ErrorProvider, 502, false)
 		if finishErr := s.finishLocked(ctx, "failed", normalized.HTTPStatus, normalized.Code, normalized.Retryable); finishErr != nil {
+			return contract.StreamEvent{}, finishErr
+		}
+		return contract.StreamEvent{}, normalized
+	}
+	if guardrailErr := s.engine.checkStream(ctx, s.prepared, event); guardrailErr != nil {
+		normalized := normalizeError(guardrailErr, contract.ErrorPermission, 400, false)
+		if finishErr := s.finishLocked(ctx, "rejected", normalized.HTTPStatus, normalized.Code, false); finishErr != nil {
 			return contract.StreamEvent{}, finishErr
 		}
 		return contract.StreamEvent{}, normalized

@@ -34,6 +34,7 @@ type Model struct {
 	Operations                 []contract.Operation
 	Capabilities               map[string]bool
 	FallbackModelIDs           []contract.ID
+	GuardrailIDs               []contract.ID
 	DefaultParameters          json.RawMessage
 	UnsupportedParameterPolicy string
 	PolicyID                   contract.ID

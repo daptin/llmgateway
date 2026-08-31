@@ -109,6 +109,18 @@ func Compile(doc Document) (*Snapshot, error) {
 		}
 		s.guardrails[guardrail.ID] = cloneGuardrail(guardrail)
 	}
+	for modelID, model := range s.models {
+		seen := make(map[contract.ID]struct{}, len(model.GuardrailIDs))
+		for _, guardrailID := range model.GuardrailIDs {
+			if _, duplicate := seen[guardrailID]; duplicate {
+				return nil, fmt.Errorf("model %q has duplicate guardrail %q", modelID, guardrailID)
+			}
+			seen[guardrailID] = struct{}{}
+			if _, exists := s.guardrails[guardrailID]; !exists {
+				return nil, fmt.Errorf("model %q references unknown guardrail %q", modelID, guardrailID)
+			}
+		}
+	}
 	return s, nil
 }
 
@@ -172,6 +184,27 @@ func (s *Snapshot) Providers() []Provider {
 		providers = append(providers, cloneProvider(s.providers[id]))
 	}
 	return providers
+}
+
+func (s *Snapshot) GuardrailsForModel(id contract.ID) []Guardrail {
+	model, ok := s.models[id]
+	if !ok {
+		return nil
+	}
+	result := make([]Guardrail, 0, len(model.GuardrailIDs))
+	for _, guardrailID := range model.GuardrailIDs {
+		guardrail := s.guardrails[guardrailID]
+		if guardrail.Enabled {
+			result = append(result, cloneGuardrail(guardrail))
+		}
+	}
+	sort.SliceStable(result, func(i, j int) bool {
+		if result[i].Priority == result[j].Priority {
+			return result[i].ID < result[j].ID
+		}
+		return result[i].Priority < result[j].Priority
+	})
+	return result
 }
 
 func (s *Snapshot) DeploymentsForModel(id contract.ID) []Deployment {
@@ -323,10 +356,12 @@ func cloneProvider(value Provider) Provider {
 func cloneModel(value Model) Model {
 	value.Operations = append([]contract.Operation(nil), value.Operations...)
 	value.FallbackModelIDs = append([]contract.ID(nil), value.FallbackModelIDs...)
+	value.GuardrailIDs = append([]contract.ID(nil), value.GuardrailIDs...)
 	value.DefaultParameters = append([]byte(nil), value.DefaultParameters...)
 	if value.Capabilities != nil {
-		value.Capabilities = make(map[string]bool, len(value.Capabilities))
-		for key, enabled := range value.Capabilities {
+		source := value.Capabilities
+		value.Capabilities = make(map[string]bool, len(source))
+		for key, enabled := range source {
 			value.Capabilities[key] = enabled
 		}
 	}

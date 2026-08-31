@@ -10,6 +10,7 @@ import (
 	"github.com/daptin/llmgateway/adapter"
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
+	"github.com/daptin/llmgateway/guardrail"
 	"github.com/daptin/llmgateway/testkit"
 )
 
@@ -40,8 +41,8 @@ func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, accounting *tes
 	clock := testkit.NewAutoClock(time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC))
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(testDocument()), Adapters: registry,
-		Authorizer: testkit.AllowAuthorizer{}, Accounting: accounting, Counters: testkit.NewCounterStore(clock.Now),
-		Selector: testkit.NewSelector(0), Clock: clock,
+		Authorizer: testkit.AllowAuthorizer{}, Accounting: accounting, Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
+		Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
 	}, llmgateway.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -96,7 +97,7 @@ func TestEngineRetriesOnlyRetryableFailure(t *testing.T) {
 	}
 	store := testkit.NewAccountingStore()
 	clock := testkit.NewAutoClock(time.Now())
-	engine, err := llmgateway.New(llmgateway.Dependencies{Catalog: source, Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Accounting: store, Counters: testkit.NewCounterStore(clock.Now), Selector: testkit.NewSelector(0), Clock: clock}, llmgateway.Options{})
+	engine, err := llmgateway.New(llmgateway.Dependencies{Catalog: source, Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Accounting: store, Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock}, llmgateway.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}

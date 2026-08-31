@@ -166,6 +166,18 @@ func (s *AccountingStore) State(requestID contract.ID) string {
 	return ""
 }
 
+func (s *AccountingStore) Completion(requestID contract.ID) (contract.Completion, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	request := s.requests[requestID]
+	if request == nil || request.completion == nil {
+		return contract.Completion{}, false
+	}
+	completion := *request.completion
+	completion.Attempts = append([]contract.Attempt(nil), request.completion.Attempts...)
+	return completion, true
+}
+
 func (s *AccountingStore) held(token contract.ReservationToken) (*accountingRequest, error) {
 	request := s.requests[token.RequestID]
 	if request == nil || request.token.Opaque != token.Opaque {

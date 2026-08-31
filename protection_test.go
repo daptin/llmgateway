@@ -11,6 +11,7 @@ import (
 	"github.com/daptin/llmgateway/adapter"
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
+	"github.com/daptin/llmgateway/guardrail"
 	"github.com/daptin/llmgateway/testkit"
 )
 
@@ -22,7 +23,7 @@ func protectedEngine(t *testing.T, document catalog.Document, provider adapter.A
 	}
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(document), Adapters: registry, Authorizer: testkit.AllowAuthorizer{},
-		Accounting: accounting, Counters: counters, Selector: testkit.NewSelector(0), Clock: clock,
+		Accounting: accounting, Counters: counters, Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
 	}, options)
 	if err != nil {
 		t.Fatal(err)

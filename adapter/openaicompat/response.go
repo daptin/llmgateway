@@ -68,6 +68,10 @@ type responsesResponseWire struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		} `json:"content"`
+		Summary []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"summary"`
 	} `json:"output"`
 	Usage usageWire `json:"usage"`
 }
@@ -124,6 +128,9 @@ func decodeResponse(operation contract.Operation, payload []byte) (contract.Resp
 			output := contract.ResponseOutputItem{Type: item.Type, ID: item.ID, Role: item.Role, Status: item.Status, CallID: item.CallID, Name: item.Name, Arguments: item.Arguments}
 			for _, part := range item.Content {
 				output.Content = append(output.Content, contract.ContentPart{Type: part.Type, Text: part.Text})
+			}
+			for _, part := range item.Summary {
+				output.Summary = append(output.Summary, contract.ContentPart{Type: part.Type, Text: part.Text})
 			}
 			result.Responses.Output = append(result.Responses.Output, output)
 		}

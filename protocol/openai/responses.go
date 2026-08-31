@@ -17,7 +17,7 @@ type responsesRequest struct {
 	Input              json.RawMessage `json:"input"`
 	Instructions       string          `json:"instructions,omitempty"`
 	Stream             bool            `json:"stream,omitempty"`
-	Tools              []chatTool      `json:"tools,omitempty"`
+	Tools              []responseTool  `json:"tools,omitempty"`
 	ToolChoice         json.RawMessage `json:"tool_choice,omitempty"`
 	Text               *responseText   `json:"text,omitempty"`
 	MaxOutputTokens    *int64          `json:"max_output_tokens,omitempty"`
@@ -45,6 +45,14 @@ type responseInputItem struct {
 	Name      string          `json:"name,omitempty"`
 	Arguments string          `json:"arguments,omitempty"`
 	Output    string          `json:"output,omitempty"`
+}
+
+type responseTool struct {
+	Type        string          `json:"type"`
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters"`
+	Strict      *bool           `json:"strict,omitempty"`
 }
 
 type responseContentPart struct {
@@ -117,12 +125,12 @@ func (h *Handler) canonicalResponse(id contract.ID, wire responsesRequest, reque
 	}
 	canonical := &contract.ResponsesRequest{Instructions: wire.Instructions, Input: input}
 	for _, tool := range wire.Tools {
-		if tool.Type != "function" || tool.Function.Name == "" || len(tool.Function.Parameters) == 0 {
+		if tool.Type != "function" || tool.Name == "" || len(tool.Parameters) == 0 {
 			return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid function tool", http.StatusBadRequest, false, nil)
 		}
-		canonical.Tools = append(canonical.Tools, contract.Tool{Type: tool.Type, Function: contract.FunctionDefinition{Name: tool.Function.Name, Description: tool.Function.Description, Parameters: append([]byte(nil), tool.Function.Parameters...), Strict: tool.Function.Strict}})
+		canonical.Tools = append(canonical.Tools, contract.Tool{Type: tool.Type, Function: contract.FunctionDefinition{Name: tool.Name, Description: tool.Description, Parameters: append([]byte(nil), tool.Parameters...), Strict: tool.Strict}})
 	}
-	canonical.ToolChoice, err = convertToolChoice(wire.ToolChoice)
+	canonical.ToolChoice, err = convertResponseToolChoice(wire.ToolChoice)
 	if err != nil {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid tool_choice", http.StatusBadRequest, false, err)
 	}
@@ -137,6 +145,27 @@ func (h *Handler) canonicalResponse(id contract.ID, wire responsesRequest, reque
 		EstimatedUsage: contract.Usage{InputTokens: requestBytes, OutputTokens: maximum, TotalTokens: requestBytes + maximum, Estimated: true},
 		Responses:      canonical,
 	}, nil
+}
+
+func convertResponseToolChoice(raw json.RawMessage) (*contract.ToolChoice, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+	if trimmed[0] == '"' {
+		return convertToolChoice(raw)
+	}
+	var value struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if err := decodeStrict(raw, &value); err != nil {
+		return nil, err
+	}
+	if value.Type != "function" || value.Name == "" {
+		return nil, errors.New("named response tool choice requires a function name")
+	}
+	return &contract.ToolChoice{Mode: "function", FunctionName: value.Name}, nil
 }
 
 func convertResponseInput(raw json.RawMessage) ([]contract.ResponseInputItem, error) {
@@ -281,6 +310,15 @@ func encodeResponseOutput(item contract.ResponseOutputItem) (map[string]any, err
 		encoded["call_id"] = item.CallID
 		encoded["name"] = item.Name
 		encoded["arguments"] = item.Arguments
+	case "reasoning":
+		summary := make([]map[string]any, 0, len(item.Summary))
+		for _, part := range item.Summary {
+			if part.Type != "summary_text" {
+				return nil, gatewayError(contract.ErrorProvider, "provider returned unsupported reasoning content", http.StatusBadGateway, false, nil)
+			}
+			summary = append(summary, map[string]any{"type": part.Type, "text": part.Text})
+		}
+		encoded["summary"] = summary
 	default:
 		return nil, gatewayError(contract.ErrorProvider, "provider returned unsupported response item", http.StatusBadGateway, false, nil)
 	}
