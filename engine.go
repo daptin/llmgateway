@@ -375,11 +375,11 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 	settled := false
 	defer func() {
 		if !settled {
-			_ = e.cancel(ctx, contract.Cancellation{Token: prepared.token, Reason: "invoke_abandoned", EndedAt: e.clock.Now()})
+			_ = e.cancelPrepared(ctx, prepared, contract.Cancellation{Token: prepared.token, Reason: "invoke_abandoned", EndedAt: e.clock.Now()})
 		}
 	}()
 	finish := func(completion contract.Completion) error {
-		if finishErr := e.finalize(ctx, completion); finishErr != nil {
+		if finishErr := e.finalizePrepared(ctx, prepared, completion); finishErr != nil {
 			return finishErr
 		}
 		settled = true
@@ -475,11 +475,12 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 }
 
 type preparedRequest struct {
-	runtime *runtimeSnapshot
-	request contract.Request
-	model   catalog.Model
-	plan    routing.Plan
-	token   contract.ReservationToken
+	runtime   *runtimeSnapshot
+	request   contract.Request
+	model     catalog.Model
+	plan      routing.Plan
+	token     contract.ReservationToken
+	principal contract.Principal
 }
 
 func (e *Engine) prepare(ctx context.Context, principal contract.Principal, request contract.Request) (preparedRequest, error) {
@@ -516,7 +517,7 @@ func (e *Engine) resolve(ctx context.Context, principal contract.Principal, requ
 	if err := e.checkInput(ctx, runtime, model, request); err != nil {
 		return preparedRequest{}, err
 	}
-	return preparedRequest{runtime: runtime, request: request, model: model}, nil
+	return preparedRequest{runtime: runtime, request: request, model: model, principal: principal}, nil
 }
 
 func (e *Engine) admit(ctx context.Context, principal contract.Principal, prepared preparedRequest) (preparedRequest, error) {
@@ -612,6 +613,12 @@ func (e *Engine) finalize(parent context.Context, completion contract.Completion
 	return nil
 }
 
+func (e *Engine) finalizePrepared(parent context.Context, prepared preparedRequest, completion contract.Completion) error {
+	err := e.finalize(parent, completion)
+	e.recordTerminal(parent, prepared, completion.Status, completion.ErrorCode, completion.CacheStatus, completion.Usage, completion.Attempts, completion.EndedAt, err)
+	return err
+}
+
 func (e *Engine) cancel(parent context.Context, cancellation contract.Cancellation) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), e.finalizationTimeout)
 	defer cancel()
@@ -619,6 +626,46 @@ func (e *Engine) cancel(parent context.Context, cancellation contract.Cancellati
 		return publicError(contract.ErrorInternal, "accounting cancellation failed", 500, false, err)
 	}
 	return nil
+}
+
+func (e *Engine) cancelPrepared(parent context.Context, prepared preparedRequest, cancellation contract.Cancellation) error {
+	err := e.cancel(parent, cancellation)
+	e.recordTerminal(parent, prepared, "cancelled", contract.ErrorProvider, "", cancellation.Usage, cancellation.Attempts, cancellation.EndedAt, err)
+	return err
+}
+
+func (e *Engine) recordTerminal(parent context.Context, prepared preparedRequest, status string, code contract.ErrorCode, cacheStatus string,
+	usage contract.Usage, attempts []contract.Attempt, ended time.Time, accountingErr error) {
+	ctx := context.WithoutCancel(parent)
+	for _, attempt := range attempts {
+		e.telemetry.Record(ctx, TelemetryEvent{Name: "attempt.completed", RequestID: prepared.request.ID,
+			Revision: prepared.runtime.catalog.Revision(), Attributes: map[string]string{
+				"operation": string(prepared.request.Operation), "model": prepared.request.PublicModel,
+				"provider_id": string(attempt.ProviderID), "deployment_id": string(attempt.DeploymentID),
+				"outcome": attempt.Outcome, "error_code": string(attempt.ErrorCode),
+			}, Measures: map[string]int64{"attempt": int64(attempt.Number), "duration_ms": durationMillis(attempt.StartedAt, attempt.EndedAt),
+				"time_to_first_byte_ms": durationMillis(attempt.StartedAt, attempt.FirstByteAt), "input_tokens": attempt.Usage.InputTokens,
+				"output_tokens": attempt.Usage.OutputTokens, "cost_micros": attempt.Usage.CostMicros}})
+	}
+	accountingStatus := "ok"
+	if accountingErr != nil {
+		accountingStatus = "failed"
+	}
+	e.telemetry.Record(ctx, TelemetryEvent{Name: "request.completed", RequestID: prepared.request.ID,
+		Revision: prepared.runtime.catalog.Revision(), Attributes: map[string]string{
+			"operation": string(prepared.request.Operation), "model": prepared.request.PublicModel, "status": status,
+			"error_code": string(code), "cache_status": cacheStatus, "key_id": string(prepared.principal.KeyID),
+			"key_prefix": prepared.principal.KeyPrefix, "owner_id": string(prepared.principal.OwnerID),
+			"team_id": string(prepared.principal.TeamID), "accounting": accountingStatus,
+		}, Measures: map[string]int64{"attempt_count": int64(len(attempts)), "duration_ms": durationMillis(prepared.request.StartedAt, ended),
+			"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens, "total_tokens": usage.TotalTokens, "cost_micros": usage.CostMicros}})
+}
+
+func durationMillis(start, end time.Time) int64 {
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return 0
+	}
+	return end.Sub(start).Milliseconds()
 }
 
 func (e *Engine) waitForRetry(ctx context.Context, failureIndex int, failure *contract.Error) error {

@@ -59,11 +59,11 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 	transferred := false
 	defer func() {
 		if !transferred {
-			_ = e.cancel(ctx, contract.Cancellation{Token: prepared.token, Reason: "stream_setup_abandoned", EndedAt: e.clock.Now()})
+			_ = e.cancelPrepared(ctx, prepared, contract.Cancellation{Token: prepared.token, Reason: "stream_setup_abandoned", EndedAt: e.clock.Now()})
 		}
 	}()
 	finish := func(completion contract.Completion) error {
-		if finishErr := e.finalize(ctx, completion); finishErr != nil {
+		if finishErr := e.finalizePrepared(ctx, prepared, completion); finishErr != nil {
 			return finishErr
 		}
 		transferred = true
@@ -222,7 +222,7 @@ func (s *GatewayStream) Close(ctx context.Context) error {
 		OutputCommitted: s.committed, Usage: s.usage,
 	}
 	s.attempts = append(s.attempts, attempt)
-	err := s.engine.cancel(ctx, contract.Cancellation{Token: s.prepared.token, Reason: "stream_closed", Usage: s.usage, Attempts: s.attempts, EndedAt: ended})
+	err := s.engine.cancelPrepared(ctx, s.prepared, contract.Cancellation{Token: s.prepared.token, Reason: "stream_closed", Usage: s.usage, Attempts: s.attempts, EndedAt: ended})
 	s.terminal = true
 	if err != nil {
 		return err
@@ -263,7 +263,7 @@ func (s *GatewayStream) finishLocked(ctx context.Context, status string, httpSta
 		ErrorCode: code, HTTPStatus: httpStatus, Retryable: retryable, OutputCommitted: s.committed, Usage: usage,
 	}
 	s.attempts = append(s.attempts, attempt)
-	if err := s.engine.finalize(ctx, contract.Completion{
+	if err := s.engine.finalizePrepared(ctx, s.prepared, contract.Completion{
 		Token: s.prepared.token, Status: status, HTTPStatus: httpStatus, ErrorCode: code,
 		Usage: usage, Attempts: s.attempts, FirstByteAt: s.firstByteAt, EndedAt: ended,
 	}); err != nil {

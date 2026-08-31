@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,7 +33,7 @@ func chatRequest(id string, stream bool) contract.Request {
 	}
 }
 
-func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, accounting *testkit.AccountingStore) *llmgateway.Engine {
+func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, accounting *testkit.AccountingStore, sinks ...llmgateway.TelemetrySink) *llmgateway.Engine {
 	t.Helper()
 	registry := adapter.NewRegistry()
 	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) {
@@ -41,15 +42,36 @@ func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, accounting *tes
 		t.Fatal(err)
 	}
 	clock := testkit.NewAutoClock(time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC))
+	telemetry := llmgateway.TelemetrySink(llmgateway.DiscardTelemetrySink{})
+	if len(sinks) == 1 {
+		telemetry = sinks[0]
+	}
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(testDocument()), Adapters: registry,
 		Authorizer: testkit.AllowAuthorizer{}, Accounting: accounting, Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
-		Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
+		Guardrails: guardrail.NewRegistry(), Telemetry: telemetry, Selector: testkit.NewSelector(0), Clock: clock,
 	}, llmgateway.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	return engine
+}
+
+type captureTelemetry struct {
+	mu     sync.Mutex
+	events []llmgateway.TelemetryEvent
+}
+
+func (s *captureTelemetry) Record(_ context.Context, event llmgateway.TelemetryEvent) {
+	s.mu.Lock()
+	s.events = append(s.events, event)
+	s.mu.Unlock()
+}
+
+func (s *captureTelemetry) snapshot() []llmgateway.TelemetryEvent {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]llmgateway.TelemetryEvent(nil), s.events...)
 }
 
 func TestEngineReloadInvokeAndDrain(t *testing.T) {
@@ -95,6 +117,37 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 		t.Fatalf("expected ErrDraining, got %v", err)
 	}
 	assertReadyStatus(t, handler, http.StatusServiceUnavailable)
+}
+
+func TestTerminalTelemetryHasStableSafeDimensions(t *testing.T) {
+	provider := testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		testkit.AdapterStep{Response: contract.Response{Usage: contract.Usage{InputTokens: 2, OutputTokens: 3, TotalTokens: 5}}})
+	sink := &captureTelemetry{}
+	engine := newEngine(t, provider, testkit.NewAccountingStore(), sink)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	request := chatRequest("telemetry-request", false)
+	request.EstimatedUsage = contract.Usage{TotalTokens: 10}
+	if _, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key", OwnerID: "owner", TeamID: "team"}, request); err != nil {
+		t.Fatal(err)
+	}
+	events := sink.snapshot()
+	if len(events) != 2 || events[0].Name != "attempt.completed" || events[1].Name != "request.completed" {
+		t.Fatalf("events=%+v", events)
+	}
+	terminal := events[1]
+	if terminal.RequestID != request.ID || terminal.Revision != 1 || terminal.Attributes["model"] != "model" ||
+		terminal.Attributes["key_id"] != "key" || terminal.Measures["total_tokens"] != 5 {
+		t.Fatalf("terminal=%+v", terminal)
+	}
+	for _, event := range events {
+		for _, value := range event.Attributes {
+			if value == "hello" {
+				t.Fatal("telemetry leaked prompt content")
+			}
+		}
+	}
 }
 
 func assertReadyStatus(t *testing.T, handler http.Handler, expected int) {
