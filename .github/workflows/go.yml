@@ -1,0 +1,32 @@
+name: go
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: go-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.x'
+          cache: true
+      - run: go test ./...
+      - run: go test -race ./...
+      - run: go vet ./...
+      - name: Enforce host independence
+        run: |
+          if go list -deps ./... | grep -E 'github.com/daptin/daptin|github.com/gin-gonic/gin|github.com/artpar/api2go|github.com/jmoiron/sqlx|github.com/doug-martin/goqu|github.com/buraksezer/olric|database/sql'; then
+            echo 'forbidden host dependency detected'
+            exit 1
+          fi

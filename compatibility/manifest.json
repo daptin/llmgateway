@@ -1,0 +1,105 @@
+{
+  "version": "2026-08-31",
+  "kind": "target",
+  "comparison": {
+    "litellm": "1.98.0",
+    "openai": {
+      "go": "v3.54.0",
+      "python": "3.6.0",
+      "javascript": "7.8.0"
+    }
+  },
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "fields": {
+        "model": "native",
+        "messages": "translated",
+        "stream": "native",
+        "stream_options.include_usage": "native",
+        "tools": "translated",
+        "tool_choice": "translated",
+        "response_format": "translated",
+        "n": "translated",
+        "temperature": "translated",
+        "top_p": "translated",
+        "max_tokens": "translated",
+        "max_completion_tokens": "translated",
+        "stop": "translated",
+        "user": "translated",
+        "logprobs": "translated"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/responses",
+      "fields": {
+        "model": "native",
+        "input": "translated",
+        "instructions": "translated",
+        "stream": "native",
+        "tools": "translated",
+        "tool_choice": "translated",
+        "text.format": "translated",
+        "store": "rejected",
+        "previous_response_id": "rejected"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/embeddings",
+      "fields": {
+        "model": "native",
+        "input": "translated",
+        "dimensions": "translated",
+        "encoding_format": "translated",
+        "user": "translated"
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/v1/images/generations",
+      "fields": {
+        "model": "native",
+        "prompt": "translated",
+        "n": "translated",
+        "size": "translated",
+        "quality": "translated",
+        "response_format": "translated"
+      }
+    },
+    {"method": "GET", "path": "/v1/models", "fields": {}},
+    {"method": "GET", "path": "/v1/models/{id}", "fields": {}}
+  ],
+  "providers": [
+    {"name": "openai", "operations": {"chat": "native", "responses": "native", "embeddings": "native", "image_generation": "native"}},
+    {"name": "azure-openai", "operations": {"chat": "translated", "responses": "translated", "embeddings": "translated", "image_generation": "translated"}},
+    {"name": "anthropic", "operations": {"chat": "translated", "responses": "translated"}},
+    {"name": "gemini", "operations": {"chat": "translated", "responses": "translated", "embeddings": "translated", "image_generation": "translated"}},
+    {"name": "vertex", "operations": {"chat": "translated", "responses": "translated", "embeddings": "translated", "image_generation": "translated"}},
+    {"name": "bedrock", "operations": {"chat": "translated", "responses": "translated", "embeddings": "translated"}},
+    {"name": "ollama", "operations": {"chat": "translated", "embeddings": "translated"}},
+    {"name": "openai-compatible", "operations": {"chat": "passthrough", "embeddings": "passthrough", "image_generation": "passthrough"}}
+  ],
+  "error_codes": [
+    "invalid_request",
+    "authentication_error",
+    "permission_error",
+    "model_not_found",
+    "rate_limit_error",
+    "insufficient_quota",
+    "timeout_error",
+    "service_unavailable",
+    "provider_error",
+    "internal_error"
+  ],
+  "streaming_events": {
+    "content_delta": "native",
+    "tool_call_delta": "native",
+    "finish": "native",
+    "usage": "native",
+    "done": "native",
+    "error": "native"
+  }
+}
