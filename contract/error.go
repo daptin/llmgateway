@@ -1,6 +1,9 @@
 package contract
 
-import "fmt"
+import (
+	"fmt"
+	"time"
+)
 
 type ErrorCode string
 
@@ -24,6 +27,7 @@ type Error struct {
 	Message    string
 	HTTPStatus int
 	Retryable  bool
+	RetryAfter time.Duration
 	Cause      error
 }
 

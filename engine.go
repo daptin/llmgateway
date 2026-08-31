@@ -16,8 +16,9 @@ import (
 )
 
 var (
-	ErrDraining = errors.New("llmgateway is draining")
-	ErrNotReady = errors.New("llmgateway has no valid catalog snapshot")
+	ErrDraining     = errors.New("llmgateway is draining")
+	ErrNotReady     = errors.New("llmgateway has no valid catalog snapshot")
+	ErrCounterLimit = errors.New("llmgateway transient counter limit exceeded")
 )
 
 type Dependencies struct {
@@ -26,6 +27,7 @@ type Dependencies struct {
 	Adapters   *adapter.Registry
 	Authorizer Authorizer
 	Accounting AccountingStore
+	Counters   CounterStore
 	Selector   Selector
 	Clock      Clock
 }
@@ -33,6 +35,11 @@ type Dependencies struct {
 type Options struct {
 	MaxAttempts         int
 	FinalizationTimeout time.Duration
+	BaseRetryDelay      time.Duration
+	MaxRetryDelay       time.Duration
+	CircuitFailures     int64
+	CircuitWindow       time.Duration
+	CircuitCooldown     time.Duration
 }
 
 type runtimeSnapshot struct {
@@ -54,10 +61,16 @@ type Engine struct {
 	adapters            *adapter.Registry
 	authorizer          Authorizer
 	accounting          AccountingStore
+	counters            CounterStore
 	selector            Selector
 	clock               Clock
 	maxAttempts         int
 	finalizationTimeout time.Duration
+	baseRetryDelay      time.Duration
+	maxRetryDelay       time.Duration
+	circuitFailures     int64
+	circuitWindow       time.Duration
+	circuitCooldown     time.Duration
 	snapshot            atomic.Pointer[runtimeSnapshot]
 	draining            atomic.Bool
 	reloadMu            sync.Mutex
@@ -67,8 +80,8 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 	if dependencies.Catalog == nil {
 		return nil, errors.New("catalog source is required")
 	}
-	if dependencies.Adapters == nil || dependencies.Authorizer == nil || dependencies.Accounting == nil || dependencies.Selector == nil || dependencies.Clock == nil {
-		return nil, errors.New("adapters, authorizer, accounting, selector, and clock are required")
+	if dependencies.Adapters == nil || dependencies.Authorizer == nil || dependencies.Accounting == nil || dependencies.Counters == nil || dependencies.Selector == nil || dependencies.Clock == nil {
+		return nil, errors.New("adapters, authorizer, accounting, counters, selector, and clock are required")
 	}
 	if options.MaxAttempts == 0 {
 		options.MaxAttempts = 3
@@ -82,11 +95,34 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 	if options.FinalizationTimeout < 0 {
 		return nil, errors.New("finalization timeout must be positive")
 	}
+	if options.BaseRetryDelay == 0 {
+		options.BaseRetryDelay = 100 * time.Millisecond
+	}
+	if options.MaxRetryDelay == 0 {
+		options.MaxRetryDelay = 2 * time.Second
+	}
+	if options.BaseRetryDelay < 0 || options.MaxRetryDelay < options.BaseRetryDelay {
+		return nil, errors.New("retry delays must be positive and ordered")
+	}
+	if options.CircuitFailures == 0 {
+		options.CircuitFailures = 5
+	}
+	if options.CircuitWindow == 0 {
+		options.CircuitWindow = 30 * time.Second
+	}
+	if options.CircuitCooldown == 0 {
+		options.CircuitCooldown = 15 * time.Second
+	}
+	if options.CircuitFailures < 1 || options.CircuitWindow < options.CircuitCooldown || options.CircuitCooldown < time.Second {
+		return nil, errors.New("circuit settings must be positive and the failure window must cover cooldown")
+	}
 	dependencies.Adapters.Freeze()
 	return &Engine{
 		catalog: dependencies.Catalog, secrets: dependencies.Secrets, adapters: dependencies.Adapters,
-		authorizer: dependencies.Authorizer, accounting: dependencies.Accounting, selector: dependencies.Selector,
+		authorizer: dependencies.Authorizer, accounting: dependencies.Accounting, counters: dependencies.Counters, selector: dependencies.Selector,
 		clock: dependencies.Clock, maxAttempts: options.MaxAttempts, finalizationTimeout: options.FinalizationTimeout,
+		baseRetryDelay: options.BaseRetryDelay, maxRetryDelay: options.MaxRetryDelay,
+		circuitFailures: options.CircuitFailures, circuitWindow: options.CircuitWindow, circuitCooldown: options.CircuitCooldown,
 	}, nil
 }
 
@@ -159,90 +195,85 @@ func (e *Engine) Snapshot() (*catalog.Snapshot, error) {
 	return current.catalog, nil
 }
 
+// Authorize evaluates model visibility through the same host policy used by
+// invocation. Protocol handlers use it for discovery without duplicating ACLs.
+func (e *Engine) Authorize(ctx context.Context, principal contract.Principal, publicModel string) error {
+	current, err := e.currentRuntime()
+	if err != nil {
+		return err
+	}
+	model, ok := current.catalog.ModelByName(publicModel)
+	if !ok || !model.Enabled {
+		return publicError(contract.ErrorModelNotFound, "model not found", 404, false, nil)
+	}
+	if err := e.authorizer.Authorize(ctx, principal, model); err != nil {
+		return normalizeError(err, contract.ErrorPermission, 403, false)
+	}
+	return nil
+}
+
 func (e *Engine) Drain(context.Context) error {
 	e.draining.Store(true)
 	return nil
 }
 
 func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, request contract.Request) (contract.Response, error) {
-	runtime, err := e.currentRuntime()
+	if request.Stream {
+		return contract.Response{}, publicError(contract.ErrorInvalidRequest, "invalid non-streaming request", 400, false, nil)
+	}
+	prepared, err := e.prepare(ctx, principal, request)
 	if err != nil {
 		return contract.Response{}, err
 	}
-	if request.ID == "" || request.PublicModel == "" || !request.Operation.Valid() || request.Stream {
-		return contract.Response{}, publicError(contract.ErrorInvalidRequest, "invalid non-streaming request", 400, false, nil)
-	}
-	if request.StartedAt.IsZero() {
-		request.StartedAt = e.clock.Now()
-	}
-	model, ok := runtime.catalog.ModelByName(request.PublicModel)
-	if !ok || !model.Enabled {
-		return contract.Response{}, publicError(contract.ErrorModelNotFound, "model not found", 404, false, nil)
-	}
-	if err := e.authorizer.Authorize(ctx, principal, model); err != nil {
-		return contract.Response{}, normalizeError(err, contract.ErrorPermission, 403, false)
-	}
-	plan, err := routing.Build(runtime.catalog, request.PublicModel, request.Operation, runtime, e.selector)
-	if err != nil {
-		return contract.Response{}, publicError(contract.ErrorUnavailable, "no healthy deployment", 503, true, err)
-	}
-	if len(plan.Attempts) > e.maxAttempts {
-		plan.Attempts = plan.Attempts[:e.maxAttempts]
-	}
-	estimate := request.EstimatedUsage
-	if estimate.TotalTokens == 0 {
-		estimate.TotalTokens = estimate.InputTokens + estimate.OutputTokens
-	}
-	if !estimate.Valid() {
-		return contract.Response{}, publicError(contract.ErrorInvalidRequest, "invalid usage estimate", 400, false, nil)
-	}
-	for _, routeAttempt := range plan.Attempts {
-		cost, costErr := accounting.CostMicros(estimate, routeAttempt.Deployment.Pricing)
-		if costErr != nil {
-			return contract.Response{}, publicError(contract.ErrorInvalidRequest, "usage estimate exceeds supported range", 400, false, costErr)
+	settled := false
+	defer func() {
+		if !settled {
+			_ = e.cancel(ctx, contract.Cancellation{Token: prepared.token, Reason: "invoke_abandoned", EndedAt: e.clock.Now()})
 		}
-		if cost > estimate.CostMicros {
-			estimate.CostMicros = cost
+	}()
+	finish := func(completion contract.Completion) error {
+		if finishErr := e.finalize(ctx, completion); finishErr != nil {
+			return finishErr
 		}
+		settled = true
+		return nil
 	}
-	bindings, err := policyBindings(runtime.catalog, principal, model)
-	if err != nil {
-		return contract.Response{}, publicError(contract.ErrorInternal, "invalid effective policy", 500, false, err)
-	}
-	reservations, err := accounting.Reservations(bindings, accounting.Measures{
-		Requests: 1, InputTokens: estimate.InputTokens, OutputTokens: estimate.OutputTokens,
-		TotalTokens: estimate.TotalTokens, CostMicros: estimate.CostMicros, Concurrency: 1,
-	}, request.StartedAt)
-	if err != nil {
-		return contract.Response{}, publicError(contract.ErrorInternal, "invalid effective policy", 500, false, err)
-	}
-	token, err := e.accounting.Admit(ctx, contract.Admission{
-		RequestID: request.ID, Principal: principal, ModelID: model.ID, Operation: request.Operation,
-		StartedAt: request.StartedAt, EstimatedUsage: estimate, LimitReservations: reservations,
-	})
-	if err != nil {
-		if errors.Is(err, accounting.ErrLimitExceeded) {
-			return contract.Response{}, publicError(contract.ErrorInsufficientQuota, "insufficient quota", 402, false, err)
+	attempts := make([]contract.Attempt, 0, len(prepared.plan.Attempts))
+	for index, routeAttempt := range prepared.plan.Attempts {
+		lease, gateErr := e.beforeAttempt(ctx, routeAttempt.Deployment, prepared.request)
+		if gateErr != nil {
+			normalized := normalizeError(gateErr, contract.ErrorUnavailable, 503, true)
+			if !normalized.Retryable || index == len(prepared.plan.Attempts)-1 {
+				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
+					return contract.Response{}, finishErr
+				}
+				return contract.Response{}, normalized
+			}
+			if waitErr := e.waitForRetry(ctx, index, normalized); waitErr != nil {
+				return contract.Response{}, waitErr
+			}
+			continue
 		}
-		return contract.Response{}, publicError(contract.ErrorInternal, "accounting admission failed", 500, false, err)
-	}
-	attempts := make([]contract.Attempt, 0, len(plan.Attempts))
-	for index, routeAttempt := range plan.Attempts {
 		started := e.clock.Now()
-		response, invokeErr := runtime.adapters[routeAttempt.Provider.ID].Invoke(ctx, routeAttempt.Deployment, request)
+		response, normalized := e.invokeProvider(ctx, prepared.runtime.adapters[routeAttempt.Provider.ID], routeAttempt.Deployment, prepared.request, lease)
 		ended := e.clock.Now()
-		if invokeErr != nil {
-			normalized := normalizeError(invokeErr, contract.ErrorProvider, 502, false)
+		if normalized != nil {
 			attempts = append(attempts, contract.Attempt{
 				Number: index + 1, ProviderID: routeAttempt.Provider.ID, DeploymentID: routeAttempt.Deployment.ID,
 				StartedAt: started, EndedAt: ended, Outcome: "failed", ErrorCode: normalized.Code,
 				HTTPStatus: normalized.HTTPStatus, Retryable: normalized.Retryable,
 			})
-			if !normalized.Retryable || index == len(plan.Attempts)-1 {
-				if finishErr := e.finalize(token, contract.Completion{Token: token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Attempts: attempts, EndedAt: ended}); finishErr != nil {
+			if !normalized.Retryable || index == len(prepared.plan.Attempts)-1 {
+				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Attempts: attempts, EndedAt: ended}); finishErr != nil {
 					return contract.Response{}, finishErr
 				}
 				return contract.Response{}, normalized
+			}
+			if waitErr := e.waitForRetry(ctx, index, normalized); waitErr != nil {
+				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "cancelled", HTTPStatus: 499, ErrorCode: contract.ErrorProvider, Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
+					return contract.Response{}, finishErr
+				}
+				return contract.Response{}, waitErr
 			}
 			continue
 		}
@@ -254,22 +285,96 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 		if costErr != nil || !usage.Valid() {
 			normalized := publicError(contract.ErrorProvider, "provider returned invalid usage", 502, false, costErr)
 			attempts = append(attempts, contract.Attempt{Number: index + 1, ProviderID: routeAttempt.Provider.ID, DeploymentID: routeAttempt.Deployment.ID, StartedAt: started, EndedAt: ended, Outcome: "failed", ErrorCode: normalized.Code, HTTPStatus: normalized.HTTPStatus})
-			if finishErr := e.finalize(token, contract.Completion{Token: token, Status: "failed", HTTPStatus: 502, ErrorCode: normalized.Code, Attempts: attempts, EndedAt: ended}); finishErr != nil {
+			if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: 502, ErrorCode: normalized.Code, Attempts: attempts, EndedAt: ended}); finishErr != nil {
 				return contract.Response{}, finishErr
 			}
 			return contract.Response{}, normalized
 		}
 		usage.CostMicros = cost
-		response.RequestID = request.ID
-		response.Model = request.PublicModel
+		response.RequestID = prepared.request.ID
+		response.Model = prepared.request.PublicModel
 		response.Usage = usage
 		attempts = append(attempts, contract.Attempt{Number: index + 1, ProviderID: routeAttempt.Provider.ID, DeploymentID: routeAttempt.Deployment.ID, StartedAt: started, EndedAt: ended, Outcome: "succeeded", HTTPStatus: 200, Usage: usage})
-		if err := e.finalize(token, contract.Completion{Token: token, Status: "succeeded", HTTPStatus: 200, Usage: usage, Attempts: attempts, EndedAt: ended}); err != nil {
+		if err := finish(contract.Completion{Token: prepared.token, Status: "succeeded", HTTPStatus: 200, Usage: usage, Attempts: attempts, EndedAt: ended}); err != nil {
 			return contract.Response{}, err
 		}
 		return response, nil
 	}
 	return contract.Response{}, publicError(contract.ErrorUnavailable, "no healthy deployment", 503, true, nil)
+}
+
+type preparedRequest struct {
+	runtime *runtimeSnapshot
+	request contract.Request
+	model   catalog.Model
+	plan    routing.Plan
+	token   contract.ReservationToken
+}
+
+func (e *Engine) prepare(ctx context.Context, principal contract.Principal, request contract.Request) (preparedRequest, error) {
+	runtime, err := e.currentRuntime()
+	if err != nil {
+		return preparedRequest{}, err
+	}
+	if err := request.Validate(); err != nil {
+		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "invalid request", 400, false, err)
+	}
+	if request.StartedAt.IsZero() {
+		request.StartedAt = e.clock.Now()
+	}
+	model, ok := runtime.catalog.ModelByName(request.PublicModel)
+	if !ok || !model.Enabled {
+		return preparedRequest{}, publicError(contract.ErrorModelNotFound, "model not found", 404, false, nil)
+	}
+	if err := e.authorizer.Authorize(ctx, principal, model); err != nil {
+		return preparedRequest{}, normalizeError(err, contract.ErrorPermission, 403, false)
+	}
+	plan, err := routing.Build(runtime.catalog, request.PublicModel, request.Operation, runtime, e.selector)
+	if err != nil {
+		return preparedRequest{}, publicError(contract.ErrorUnavailable, "no healthy deployment", 503, true, err)
+	}
+	if len(plan.Attempts) > e.maxAttempts {
+		plan.Attempts = plan.Attempts[:e.maxAttempts]
+	}
+	estimate := request.EstimatedUsage
+	if estimate.TotalTokens == 0 {
+		estimate.TotalTokens = estimate.InputTokens + estimate.OutputTokens
+	}
+	if !estimate.Valid() {
+		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "invalid usage estimate", 400, false, nil)
+	}
+	for _, routeAttempt := range plan.Attempts {
+		cost, costErr := accounting.CostMicros(estimate, routeAttempt.Deployment.Pricing)
+		if costErr != nil {
+			return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "usage estimate exceeds supported range", 400, false, costErr)
+		}
+		if cost > estimate.CostMicros {
+			estimate.CostMicros = cost
+		}
+	}
+	bindings, err := policyBindings(runtime.catalog, principal, model)
+	if err != nil {
+		return preparedRequest{}, publicError(contract.ErrorInternal, "invalid effective policy", 500, false, err)
+	}
+	reservations, err := accounting.Reservations(bindings, accounting.Measures{
+		Requests: 1, InputTokens: estimate.InputTokens, OutputTokens: estimate.OutputTokens,
+		TotalTokens: estimate.TotalTokens, CostMicros: estimate.CostMicros, Concurrency: 1,
+	}, request.StartedAt)
+	if err != nil {
+		return preparedRequest{}, publicError(contract.ErrorInternal, "invalid effective policy", 500, false, err)
+	}
+	token, err := e.accounting.Admit(ctx, contract.Admission{
+		RequestID: request.ID, Principal: principal, ModelID: model.ID, Operation: request.Operation,
+		StartedAt: request.StartedAt, EstimatedUsage: estimate, LimitReservations: reservations,
+	})
+	if err != nil {
+		if errors.Is(err, accounting.ErrLimitExceeded) {
+			return preparedRequest{}, publicError(contract.ErrorInsufficientQuota, "insufficient quota", 402, false, err)
+		}
+		return preparedRequest{}, publicError(contract.ErrorInternal, "accounting admission failed", 500, false, err)
+	}
+	request.EstimatedUsage = estimate
+	return preparedRequest{runtime: runtime, request: request, model: model, plan: plan, token: token}, nil
 }
 
 func (e *Engine) currentRuntime() (*runtimeSnapshot, error) {
@@ -283,13 +388,47 @@ func (e *Engine) currentRuntime() (*runtimeSnapshot, error) {
 	return current, nil
 }
 
-func (e *Engine) finalize(token contract.ReservationToken, completion contract.Completion) error {
-	ctx, cancel := context.WithTimeout(context.Background(), e.finalizationTimeout)
+func (e *Engine) finalize(parent context.Context, completion contract.Completion) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), e.finalizationTimeout)
 	defer cancel()
 	if err := e.accounting.Finalize(ctx, completion); err != nil {
 		return publicError(contract.ErrorInternal, "accounting finalization failed", 500, false, err)
 	}
 	return nil
+}
+
+func (e *Engine) cancel(parent context.Context, cancellation contract.Cancellation) error {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), e.finalizationTimeout)
+	defer cancel()
+	if err := e.accounting.Cancel(ctx, cancellation); err != nil {
+		return publicError(contract.ErrorInternal, "accounting cancellation failed", 500, false, err)
+	}
+	return nil
+}
+
+func (e *Engine) waitForRetry(ctx context.Context, failureIndex int, failure *contract.Error) error {
+	delay := e.baseRetryDelay
+	for index := 0; index < failureIndex && delay < e.maxRetryDelay; index++ {
+		if delay > e.maxRetryDelay/2 {
+			delay = e.maxRetryDelay
+			break
+		}
+		delay *= 2
+	}
+	if failure.RetryAfter > delay {
+		delay = failure.RetryAfter
+	}
+	if delay > e.maxRetryDelay {
+		delay = e.maxRetryDelay
+	}
+	timer := e.clock.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return normalizeError(ctx.Err(), contract.ErrorProvider, 499, false)
+	case <-timer.C():
+		return nil
+	}
 }
 
 func policyBindings(snapshot *catalog.Snapshot, principal contract.Principal, model catalog.Model) ([]accounting.Binding, error) {

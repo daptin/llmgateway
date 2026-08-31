@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/daptin/llmgateway"
 	"github.com/daptin/llmgateway/adapter"
@@ -33,10 +32,11 @@ func main() {
 	})); err != nil {
 		log.Fatal(err)
 	}
+	clock := llmgateway.SystemClock{}
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(document), Adapters: registry,
-		Authorizer: testkit.AllowAuthorizer{}, Accounting: testkit.NewAccountingStore(),
-		Selector: testkit.NewSelector(0), Clock: testkit.NewClock(time.Now()),
+		Authorizer: testkit.AllowAuthorizer{}, Accounting: testkit.NewAccountingStore(), Counters: testkit.NewCounterStore(clock.Now),
+		Selector: testkit.NewSelector(0), Clock: clock,
 	}, llmgateway.Options{})
 	if err != nil {
 		log.Fatal(err)

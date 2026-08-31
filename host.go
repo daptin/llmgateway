@@ -33,8 +33,10 @@ type AccountingStore interface {
 
 type CounterStore interface {
 	Add(context.Context, string, int64, time.Duration) (int64, error)
+	Get(context.Context, string) (int64, bool, error)
 	Acquire(context.Context, string, int64, time.Duration) (string, error)
 	Release(context.Context, string) error
+	Delete(context.Context, string) error
 }
 
 type ResponseCache interface {

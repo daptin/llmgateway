@@ -131,6 +131,19 @@ func (s *Snapshot) Model(id contract.ID) (Model, bool) {
 	return cloneModel(model), true
 }
 
+func (s *Snapshot) Models() []Model {
+	ids := make([]contract.ID, 0, len(s.models))
+	for id := range s.models {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	models := make([]Model, 0, len(ids))
+	for _, id := range ids {
+		models = append(models, cloneModel(s.models[id]))
+	}
+	return models
+}
+
 func (s *Snapshot) Provider(id contract.ID) (Provider, bool) {
 	provider, ok := s.providers[id]
 	if !ok {

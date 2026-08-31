@@ -1,7 +1,6 @@
 package contract
 
 import (
-	"encoding/json"
 	"time"
 )
 
@@ -49,19 +48,27 @@ type Request struct {
 	Stream          bool
 	MaxOutputTokens int64
 	EstimatedUsage  Usage
-	Payload         json.RawMessage
+	Chat            *ChatRequest
+	Responses       *ResponsesRequest
+	Embeddings      *EmbeddingsRequest
+	ImageGeneration *ImageGenerationRequest
 	StartedAt       time.Time
 }
 
 type Response struct {
-	RequestID ID
-	Model     string
-	Payload   json.RawMessage
-	Usage     Usage
+	RequestID       ID
+	Model           string
+	Chat            *ChatResponse
+	Responses       *ResponsesResponse
+	Embeddings      *EmbeddingsResponse
+	ImageGeneration *ImageGenerationResponse
+	Usage           Usage
 }
 
 type StreamEvent struct {
-	Payload         json.RawMessage
+	Type            string
+	Chat            *ChatDelta
+	Response        *ResponseDelta
 	Usage           *Usage
 	Terminal        bool
 	OutputCommitted bool

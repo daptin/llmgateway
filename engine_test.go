@@ -22,6 +22,13 @@ func testDocument() catalog.Document {
 	}
 }
 
+func chatRequest(id string, stream bool) contract.Request {
+	return contract.Request{
+		ID: contract.ID(id), Operation: contract.OperationChat, PublicModel: "model", Stream: stream,
+		Chat: &contract.ChatRequest{Messages: []contract.Message{{Role: "user", Content: []contract.ContentPart{{Type: "text", Text: "hello"}}}}, N: 1, MaxCompletionTokens: 10},
+	}
+}
+
 func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, accounting *testkit.AccountingStore) *llmgateway.Engine {
 	t.Helper()
 	registry := adapter.NewRegistry()
@@ -30,10 +37,11 @@ func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, accounting *tes
 	})); err != nil {
 		t.Fatal(err)
 	}
+	clock := testkit.NewAutoClock(time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC))
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(testDocument()), Adapters: registry,
-		Authorizer: testkit.AllowAuthorizer{}, Accounting: accounting,
-		Selector: testkit.NewSelector(0), Clock: testkit.NewClock(time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC)),
+		Authorizer: testkit.AllowAuthorizer{}, Accounting: accounting, Counters: testkit.NewCounterStore(clock.Now),
+		Selector: testkit.NewSelector(0), Clock: clock,
 	}, llmgateway.Options{})
 	if err != nil {
 		t.Fatal(err)
@@ -44,7 +52,7 @@ func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, accounting *tes
 func TestEngineReloadInvokeAndDrain(t *testing.T) {
 	faultAdapter := testkit.NewFaultAdapter(
 		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
-		testkit.AdapterStep{Response: contract.Response{Payload: []byte(`{"ok":true}`), Usage: contract.Usage{InputTokens: 2, OutputTokens: 3, TotalTokens: 5}}},
+		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "response"}, Usage: contract.Usage{InputTokens: 2, OutputTokens: 3, TotalTokens: 5}}},
 	)
 	store := testkit.NewAccountingStore()
 	engine := newEngine(t, faultAdapter, store)
@@ -54,10 +62,9 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	response, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, contract.Request{
-		ID: "request", Operation: contract.OperationChat, PublicModel: "model",
-		EstimatedUsage: contract.Usage{InputTokens: 2, OutputTokens: 8, TotalTokens: 10},
-	})
+	request := chatRequest("request", false)
+	request.EstimatedUsage = contract.Usage{InputTokens: 2, OutputTokens: 8, TotalTokens: 10}
+	response, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +83,7 @@ func TestEngineRetriesOnlyRetryableFailure(t *testing.T) {
 	faultAdapter := testkit.NewFaultAdapter(
 		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		testkit.AdapterStep{InvokeError: &contract.Error{Code: contract.ErrorRateLimit, Message: "limited", HTTPStatus: 429, Retryable: true}},
-		testkit.AdapterStep{Response: contract.Response{Usage: contract.Usage{TotalTokens: 1}}},
+		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "response"}, Usage: contract.Usage{TotalTokens: 1}}},
 	)
 	document := testDocument()
 	document.Deployments = append(document.Deployments, catalog.Deployment{ID: "d2", Name: "second", ProviderID: "p", ModelID: "m", UpstreamModel: "other", Operations: []contract.Operation{contract.OperationChat}, Weight: 1, MaxConcurrency: -1, RPM: -1, TPM: -1, Enabled: true})
@@ -88,14 +95,15 @@ func TestEngineRetriesOnlyRetryableFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := testkit.NewAccountingStore()
-	engine, err := llmgateway.New(llmgateway.Dependencies{Catalog: source, Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Accounting: store, Selector: testkit.NewSelector(0), Clock: testkit.NewClock(time.Now())}, llmgateway.Options{})
+	clock := testkit.NewAutoClock(time.Now())
+	engine, err := llmgateway.New(llmgateway.Dependencies{Catalog: source, Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Accounting: store, Counters: testkit.NewCounterStore(clock.Now), Selector: testkit.NewSelector(0), Clock: clock}, llmgateway.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := engine.Invoke(context.Background(), contract.Principal{}, contract.Request{ID: "request", Operation: contract.OperationChat, PublicModel: "model"}); err != nil {
+	if _, err := engine.Invoke(context.Background(), contract.Principal{}, chatRequest("request", false)); err != nil {
 		t.Fatal(err)
 	}
 	if attempts := faultAdapter.Attempts(); len(attempts) != 2 || attempts[0] == attempts[1] {
@@ -113,7 +121,7 @@ func TestEngineDoesNotRetryNonRetryableFailure(t *testing.T) {
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	_, err := engine.Invoke(context.Background(), contract.Principal{}, contract.Request{ID: "request", Operation: contract.OperationChat, PublicModel: "model"})
+	_, err := engine.Invoke(context.Background(), contract.Principal{}, chatRequest("request", false))
 	if err == nil {
 		t.Fatal("expected provider failure")
 	}
