@@ -20,6 +20,12 @@ type Authenticator interface {
 	Authenticate(context.Context, string) (contract.Principal, error)
 }
 
+type AuthenticatorFunc func(context.Context, string) (contract.Principal, error)
+
+func (f AuthenticatorFunc) Authenticate(ctx context.Context, credential string) (contract.Principal, error) {
+	return f(ctx, credential)
+}
+
 type Authorizer interface {
 	Authorize(context.Context, contract.Principal, catalog.Model) error
 }

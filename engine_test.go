@@ -3,6 +3,8 @@ package llmgateway_test
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -57,12 +59,20 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 	)
 	store := testkit.NewAccountingStore()
 	engine := newEngine(t, faultAdapter, store)
+	handler, err := engine.Handler(llmgateway.HTTPOptions{Authenticator: llmgateway.AuthenticatorFunc(func(context.Context, string) (contract.Principal, error) {
+		return contract.Principal{}, nil
+	})})
+	if err != nil {
+		t.Fatalf("construct reusable HTTP handler: %v", err)
+	}
+	assertReadyStatus(t, handler, http.StatusServiceUnavailable)
 	if _, err := engine.Snapshot(); err != llmgateway.ErrNotReady {
 		t.Fatalf("expected ErrNotReady, got %v", err)
 	}
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	assertReadyStatus(t, handler, http.StatusOK)
 	request := chatRequest("request", false)
 	request.EstimatedUsage = contract.Usage{InputTokens: 2, OutputTokens: 8, TotalTokens: 10}
 	response, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, request)
@@ -77,6 +87,17 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 	}
 	if _, err := engine.Snapshot(); err != llmgateway.ErrDraining {
 		t.Fatalf("expected ErrDraining, got %v", err)
+	}
+	assertReadyStatus(t, handler, http.StatusServiceUnavailable)
+}
+
+func assertReadyStatus(t *testing.T, handler http.Handler, expected int) {
+	t.Helper()
+	request := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != expected {
+		t.Fatalf("ready status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
 
@@ -112,6 +133,42 @@ func TestEngineRetriesOnlyRetryableFailure(t *testing.T) {
 	}
 }
 
+func TestRejectedNewerCatalogDegradesReadinessWithoutReplacingSnapshot(t *testing.T) {
+	source := testkit.NewCatalogSource(testDocument())
+	registry := adapter.NewRegistry()
+	provider := testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})
+	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) { return provider, nil })); err != nil {
+		t.Fatal(err)
+	}
+	clock := testkit.NewAutoClock(time.Now())
+	engine, err := llmgateway.New(llmgateway.Dependencies{
+		Catalog: source, Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Accounting: testkit.NewAccountingStore(),
+		Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(),
+		Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
+	}, llmgateway.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	invalid := testDocument()
+	invalid.Revision = 2
+	invalid.Models[0].Name = ""
+	source.Set(invalid)
+	if err := engine.Reload(context.Background()); err == nil {
+		t.Fatal("expected invalid catalog rejection")
+	}
+	status := engine.Status()
+	if status.Revision != 1 || status.RejectedRevision != 2 || !status.Degraded || !status.Ready {
+		t.Fatalf("status = %+v", status)
+	}
+	snapshot, err := engine.Snapshot()
+	if err != nil || snapshot.Revision() != 1 {
+		t.Fatalf("last valid snapshot was not retained: revision=%v err=%v", snapshot, err)
+	}
+}
+
 func TestEngineDoesNotRetryNonRetryableFailure(t *testing.T) {
 	faultAdapter := testkit.NewFaultAdapter(
 		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
@@ -131,5 +188,38 @@ func TestEngineDoesNotRetryNonRetryableFailure(t *testing.T) {
 	}
 	if store.State("request") != "finalized" {
 		t.Fatalf("accounting state=%s", store.State("request"))
+	}
+}
+
+func TestDrainWaitsForAdmittedStreamAndRejectsNewWork(t *testing.T) {
+	faultAdapter := testkit.NewFaultAdapter(
+		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		testkit.AdapterStep{Events: []contract.StreamEvent{{Chat: &contract.ChatDelta{ID: "chunk"}}}},
+	)
+	store := testkit.NewAccountingStore()
+	engine := newEngine(t, faultAdapter, store)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	stream, err := engine.Stream(context.Background(), contract.Principal{}, chatRequest("stream", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	drainContext, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := engine.Drain(drainContext); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected drain deadline while stream is active, got %v", err)
+	}
+	if _, err := engine.Invoke(context.Background(), contract.Principal{}, chatRequest("late", false)); !errors.Is(err, llmgateway.ErrDraining) {
+		t.Fatalf("expected new request rejection, got %v", err)
+	}
+	if err := stream.Close(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if state := store.State("stream"); state != "cancelled" {
+		t.Fatalf("stream accounting state=%s", state)
 	}
 }

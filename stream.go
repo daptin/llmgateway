@@ -28,14 +28,22 @@ type GatewayStream struct {
 	lease        attemptLease
 	committed    bool
 	terminal     bool
+	done         func()
+	doneOnce     sync.Once
 }
 
-type EventStream interface {
-	Next(context.Context) (contract.StreamEvent, error)
-	Close(context.Context) error
-}
+type EventStream = contract.EventStream
 
 func (e *Engine) Stream(ctx context.Context, principal contract.Principal, request contract.Request) (EventStream, error) {
+	if !e.beginRequest() {
+		return nil, ErrDraining
+	}
+	released := false
+	defer func() {
+		if !released {
+			e.endRequest()
+		}
+	}()
 	if !request.Stream {
 		return nil, publicError(contract.ErrorInvalidRequest, "invalid streaming request", 400, false, nil)
 	}
@@ -118,12 +126,13 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 		stream := &GatewayStream{
 			engine: e, prepared: prepared, route: routeAttempt, upstream: upstream, first: &first,
 			attempts: attempts, attemptIndex: index + 1, attemptStart: started, firstByteAt: firstAt,
-			lease: lease,
+			lease: lease, done: e.endRequest,
 		}
 		if first.Usage != nil {
 			stream.usage = *first.Usage
 		}
 		transferred = true
+		released = true
 		return stream, nil
 	}
 	return nil, publicError(contract.ErrorUnavailable, "no healthy deployment", 503, true, nil)
@@ -194,8 +203,10 @@ func (s *GatewayStream) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.terminal {
+		s.releaseRequest()
 		return nil
 	}
+	defer s.releaseRequest()
 	closeErr := closeProviderStream(s.upstream)
 	s.engine.releaseAttemptLease(ctx, s.lease)
 	ended := s.engine.clock.Now()
@@ -214,6 +225,7 @@ func (s *GatewayStream) Close(ctx context.Context) error {
 }
 
 func (s *GatewayStream) finishLocked(ctx context.Context, status string, httpStatus int, code contract.ErrorCode, retryable bool) error {
+	defer s.releaseRequest()
 	ended := s.engine.clock.Now()
 	usage := s.usage
 	if usage.TotalTokens == 0 {
@@ -256,6 +268,14 @@ func (s *GatewayStream) finishLocked(ctx context.Context, status string, httpSta
 		return normalizeError(closeErr, contract.ErrorProvider, 502, false)
 	}
 	return nil
+}
+
+func (s *GatewayStream) releaseRequest() {
+	s.doneOnce.Do(func() {
+		if s.done != nil {
+			s.done()
+		}
+	})
 }
 
 func failedStreamAttempt(number int, route routing.Attempt, started, ended time.Time, err *contract.Error, committed bool) contract.Attempt {

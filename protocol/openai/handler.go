@@ -13,34 +13,39 @@ import (
 	"strings"
 	"time"
 
-	"github.com/daptin/llmgateway"
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
 )
 
 type Engine interface {
 	Invoke(context.Context, contract.Principal, contract.Request) (contract.Response, error)
-	Stream(context.Context, contract.Principal, contract.Request) (llmgateway.EventStream, error)
+	Stream(context.Context, contract.Principal, contract.Request) (contract.EventStream, error)
 	Snapshot() (*catalog.Snapshot, error)
 	Authorize(context.Context, contract.Principal, string) error
+}
+
+type Authenticator interface {
+	Authenticate(context.Context, string) (contract.Principal, error)
 }
 
 type Options struct {
 	MaxBodyBytes           int64
 	DefaultMaxOutputTokens int64
+	TotalRequestTimeout    time.Duration
 	NewRequestID           func() (contract.ID, error)
 }
 
 type Handler struct {
 	engine    Engine
-	auth      llmgateway.Authenticator
+	auth      Authenticator
 	maxBody   int64
 	maxOutput int64
+	timeout   time.Duration
 	newID     func() (contract.ID, error)
 	mux       *http.ServeMux
 }
 
-func NewHandler(engine Engine, authenticator llmgateway.Authenticator, options Options) (*Handler, error) {
+func NewHandler(engine Engine, authenticator Authenticator, options Options) (*Handler, error) {
 	if engine == nil || authenticator == nil {
 		return nil, errors.New("engine and authenticator are required")
 	}
@@ -50,13 +55,16 @@ func NewHandler(engine Engine, authenticator llmgateway.Authenticator, options O
 	if options.DefaultMaxOutputTokens == 0 {
 		options.DefaultMaxOutputTokens = 4096
 	}
-	if options.MaxBodyBytes < 1 || options.DefaultMaxOutputTokens < 1 {
+	if options.TotalRequestTimeout == 0 {
+		options.TotalRequestTimeout = 2 * time.Minute
+	}
+	if options.MaxBodyBytes < 1 || options.DefaultMaxOutputTokens < 1 || options.TotalRequestTimeout < 0 {
 		return nil, errors.New("handler bounds must be positive")
 	}
 	if options.NewRequestID == nil {
 		options.NewRequestID = randomRequestID
 	}
-	handler := &Handler{engine: engine, auth: authenticator, maxBody: options.MaxBodyBytes, maxOutput: options.DefaultMaxOutputTokens, newID: options.NewRequestID, mux: http.NewServeMux()}
+	handler := &Handler{engine: engine, auth: authenticator, maxBody: options.MaxBodyBytes, maxOutput: options.DefaultMaxOutputTokens, timeout: options.TotalRequestTimeout, newID: options.NewRequestID, mux: http.NewServeMux()}
 	handler.mux.HandleFunc("POST /v1/chat/completions", handler.chatCompletions)
 	handler.mux.HandleFunc("POST /v1/responses", handler.responses)
 	handler.mux.HandleFunc("POST /v1/embeddings", handler.embeddings)
@@ -68,6 +76,11 @@ func NewHandler(engine Engine, authenticator llmgateway.Authenticator, options O
 }
 
 func (h *Handler) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if h.timeout > 0 {
+		ctx, cancel := context.WithTimeout(request.Context(), h.timeout)
+		defer cancel()
+		request = request.WithContext(ctx)
+	}
 	h.mux.ServeHTTP(response, request)
 }
 
@@ -128,7 +141,10 @@ func decodeStrict(data []byte, destination any) error {
 
 func (h *Handler) requestID(request *http.Request) (contract.ID, error) {
 	provided := strings.TrimSpace(request.Header.Get("X-Request-ID"))
-	if validRequestID(provided) {
+	if provided != "" {
+		if !validRequestID(provided) {
+			return "", gatewayError(contract.ErrorInvalidRequest, "invalid X-Request-ID", http.StatusBadRequest, false, nil)
+		}
 		return contract.ID(provided), nil
 	}
 	return h.newID()
@@ -188,7 +204,7 @@ func writeJSON(response http.ResponseWriter, status int, id contract.ID, value a
 func (h *Handler) notFound(response http.ResponseWriter, request *http.Request) {
 	id, err := h.requestID(request)
 	if err != nil {
-		writeError(response, gatewayError(contract.ErrorInternal, "failed to create request ID", http.StatusInternalServerError, false, err), "")
+		writeError(response, err, "")
 		return
 	}
 	writeError(response, gatewayError(contract.ErrorInvalidRequest, "route not found", http.StatusNotFound, false, nil), id)

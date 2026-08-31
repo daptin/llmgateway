@@ -13,7 +13,7 @@ import (
 func (h *Handler) models(response http.ResponseWriter, request *http.Request) {
 	id, idErr := h.requestID(request)
 	if idErr != nil {
-		writeError(response, gatewayError(contract.ErrorInternal, "failed to create request ID", http.StatusInternalServerError, false, idErr), "")
+		writeError(response, idErr, "")
 		return
 	}
 	principal, err := h.authenticate(request)
@@ -40,7 +40,7 @@ func (h *Handler) models(response http.ResponseWriter, request *http.Request) {
 func (h *Handler) model(response http.ResponseWriter, request *http.Request) {
 	id, idErr := h.requestID(request)
 	if idErr != nil {
-		writeError(response, gatewayError(contract.ErrorInternal, "failed to create request ID", http.StatusInternalServerError, false, idErr), "")
+		writeError(response, idErr, "")
 		return
 	}
 	principal, err := h.authenticate(request)

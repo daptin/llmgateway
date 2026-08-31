@@ -88,6 +88,12 @@ type Engine struct {
 	snapshot            atomic.Pointer[runtimeSnapshot]
 	draining            atomic.Bool
 	reloadMu            sync.Mutex
+	statusMu            sync.RWMutex
+	rejectedRevision    uint64
+	reloadFailureStage  string
+	activeMu            sync.Mutex
+	activeRequests      int64
+	drained             chan struct{}
 }
 
 func New(dependencies Dependencies, options Options) (*Engine, error) {
@@ -144,6 +150,8 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 	}
 	dependencies.Adapters.Freeze()
 	dependencies.Guardrails.Freeze()
+	drained := make(chan struct{})
+	close(drained)
 	return &Engine{
 		catalog: dependencies.Catalog, secrets: dependencies.Secrets, adapters: dependencies.Adapters,
 		authorizer: dependencies.Authorizer, accounting: dependencies.Accounting, counters: dependencies.Counters, cache: dependencies.Cache,
@@ -152,6 +160,7 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 		baseRetryDelay: options.BaseRetryDelay, maxRetryDelay: options.MaxRetryDelay,
 		circuitFailures: options.CircuitFailures, circuitWindow: options.CircuitWindow, circuitCooldown: options.CircuitCooldown,
 		cacheTTL: options.CacheTTL, cacheTimeout: options.CacheTimeout, maxCacheEntryBytes: options.MaxCacheEntryBytes,
+		drained: drained,
 	}, nil
 }
 
@@ -167,10 +176,12 @@ func (e *Engine) Reload(ctx context.Context) error {
 	}
 	document, err := e.catalog.Load(ctx, after)
 	if err != nil {
+		e.recordReloadFailure(0, "load")
 		return err
 	}
 	compiled, err := catalog.Compile(document)
 	if err != nil {
+		e.recordReloadFailure(document.Revision, "validate")
 		return err
 	}
 	instances := make(map[contract.ID]adapter.Adapter)
@@ -180,15 +191,18 @@ func (e *Engine) Reload(ctx context.Context) error {
 		}
 		factory, ok := e.adapters.Factory(provider.Type)
 		if !ok {
+			e.recordReloadFailure(document.Revision, "adapter_registry")
 			return fmt.Errorf("provider %q uses unregistered adapter %q", provider.ID, provider.Type)
 		}
 		var secretBytes []byte
 		if provider.SecretRef != "" {
 			if e.secrets == nil {
+				e.recordReloadFailure(document.Revision, "secret")
 				return fmt.Errorf("provider %q requires a secret resolver", provider.ID)
 			}
 			secretBytes, err = e.secrets.ResolveSecret(ctx, provider.SecretRef)
 			if err != nil {
+				e.recordReloadFailure(document.Revision, "secret")
 				return fmt.Errorf("resolve provider %q secret: %w", provider.ID, err)
 			}
 		}
@@ -197,9 +211,11 @@ func (e *Engine) Reload(ctx context.Context) error {
 			secretBytes[index] = 0
 		}
 		if buildErr != nil {
+			e.recordReloadFailure(document.Revision, "adapter_build")
 			return fmt.Errorf("build provider %q adapter: %w", provider.ID, buildErr)
 		}
 		if instance == nil {
+			e.recordReloadFailure(document.Revision, "adapter_build")
 			return fmt.Errorf("provider %q adapter factory returned nil", provider.ID)
 		}
 		instances[provider.ID] = instance
@@ -209,13 +225,16 @@ func (e *Engine) Reload(ctx context.Context) error {
 		for _, configuration := range compiled.GuardrailsForModel(model.ID) {
 			factory, ok := e.guardrails.Factory(configuration.Kind)
 			if !ok {
+				e.recordReloadFailure(document.Revision, "guardrail_registry")
 				return fmt.Errorf("guardrail %q uses unregistered kind %q", configuration.ID, configuration.Kind)
 			}
 			checker, buildErr := factory.Build(configuration)
 			if buildErr != nil {
+				e.recordReloadFailure(document.Revision, "guardrail_build")
 				return fmt.Errorf("build guardrail %q: %w", configuration.ID, buildErr)
 			}
 			if checker == nil {
+				e.recordReloadFailure(document.Revision, "guardrail_build")
 				return fmt.Errorf("guardrail %q factory returned nil", configuration.ID)
 			}
 			compiledGuardrails[model.ID] = append(compiledGuardrails[model.ID], runtimeGuardrail{configuration: configuration, checker: checker})
@@ -224,10 +243,49 @@ func (e *Engine) Reload(ctx context.Context) error {
 	next := &runtimeSnapshot{catalog: compiled, adapters: instances, guardrails: compiledGuardrails}
 	current := e.snapshot.Load()
 	if current != nil && next.catalog.Revision() <= current.catalog.Revision() {
+		e.recordReloadFailure(document.Revision, "stale")
 		return catalog.ErrStaleRevision
 	}
 	e.snapshot.Store(next)
+	e.statusMu.Lock()
+	e.rejectedRevision = 0
+	e.reloadFailureStage = ""
+	e.statusMu.Unlock()
 	return nil
+}
+
+// Status is a redacted, point-in-time view of engine lifecycle and catalog
+// readiness. Failure stages are stable categories and never contain host or
+// provider error text.
+type Status struct {
+	Ready            bool   `json:"ready"`
+	Draining         bool   `json:"draining"`
+	Degraded         bool   `json:"degraded"`
+	Revision         uint64 `json:"revision"`
+	RejectedRevision uint64 `json:"rejected_revision,omitempty"`
+	ReloadStage      string `json:"reload_stage,omitempty"`
+}
+
+func (e *Engine) Status() Status {
+	status := Status{Draining: e.draining.Load()}
+	if current := e.snapshot.Load(); current != nil {
+		status.Revision = current.catalog.Revision()
+		status.Ready = !status.Draining
+	}
+	e.statusMu.RLock()
+	status.RejectedRevision = e.rejectedRevision
+	status.ReloadStage = e.reloadFailureStage
+	e.statusMu.RUnlock()
+	status.Degraded = status.RejectedRevision > status.Revision || (status.ReloadStage == "load" && status.Revision > 0)
+	return status
+}
+
+func (e *Engine) recordReloadFailure(revision uint64, stage string) {
+	e.statusMu.Lock()
+	e.rejectedRevision = revision
+	e.reloadFailureStage = stage
+	e.statusMu.Unlock()
+	e.telemetry.Record(context.Background(), TelemetryEvent{Name: "catalog.reload_failed", Revision: revision, Attributes: map[string]string{"stage": stage}})
 }
 
 func (e *Engine) Snapshot() (*catalog.Snapshot, error) {
@@ -258,12 +316,24 @@ func (e *Engine) Authorize(ctx context.Context, principal contract.Principal, pu
 	return nil
 }
 
-func (e *Engine) Drain(context.Context) error {
+func (e *Engine) Drain(ctx context.Context) error {
+	e.activeMu.Lock()
 	e.draining.Store(true)
-	return nil
+	drained := e.drained
+	e.activeMu.Unlock()
+	select {
+	case <-drained:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, request contract.Request) (contract.Response, error) {
+	if !e.beginRequest() {
+		return contract.Response{}, ErrDraining
+	}
+	defer e.endRequest()
 	if request.Stream {
 		return contract.Response{}, publicError(contract.ErrorInvalidRequest, "invalid non-streaming request", 400, false, nil)
 	}
@@ -475,14 +545,36 @@ func (e *Engine) admit(ctx context.Context, principal contract.Principal, prepar
 }
 
 func (e *Engine) currentRuntime() (*runtimeSnapshot, error) {
-	if e.draining.Load() {
-		return nil, ErrDraining
-	}
 	current := e.snapshot.Load()
 	if current == nil {
 		return nil, ErrNotReady
 	}
 	return current, nil
+}
+
+func (e *Engine) beginRequest() bool {
+	e.activeMu.Lock()
+	defer e.activeMu.Unlock()
+	if e.draining.Load() {
+		return false
+	}
+	if e.activeRequests == 0 {
+		e.drained = make(chan struct{})
+	}
+	e.activeRequests++
+	return true
+}
+
+func (e *Engine) endRequest() {
+	e.activeMu.Lock()
+	defer e.activeMu.Unlock()
+	if e.activeRequests < 1 {
+		panic("llmgateway: unbalanced request lifecycle")
+	}
+	e.activeRequests--
+	if e.activeRequests == 0 {
+		close(e.drained)
+	}
 }
 
 func (e *Engine) finalize(parent context.Context, completion contract.Completion) error {

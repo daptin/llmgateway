@@ -19,7 +19,7 @@ type imageRequest struct {
 func (h *Handler) imageGenerations(response http.ResponseWriter, request *http.Request) {
 	id, err := h.requestID(request)
 	if err != nil {
-		writeError(response, gatewayError(contract.ErrorInternal, "failed to create request ID", http.StatusInternalServerError, false, err), "")
+		writeError(response, err, "")
 		return
 	}
 	principal, err := h.authenticate(request)

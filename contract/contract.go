@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"context"
 	"time"
 )
 
@@ -72,6 +73,12 @@ type StreamEvent struct {
 	Usage           *Usage
 	Terminal        bool
 	OutputCommitted bool
+}
+
+// EventStream is the protocol-neutral streaming response contract.
+type EventStream interface {
+	Next(context.Context) (StreamEvent, error)
+	Close(context.Context) error
 }
 
 type Usage struct {

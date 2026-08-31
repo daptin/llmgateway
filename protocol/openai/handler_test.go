@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/daptin/llmgateway"
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
 )
@@ -30,7 +29,7 @@ type fakeEngine struct {
 	streamRequest contract.Request
 	invokeResult  contract.Response
 	invokeErr     error
-	stream        llmgateway.EventStream
+	stream        contract.EventStream
 	streamErr     error
 	denied        map[string]bool
 }
@@ -40,7 +39,7 @@ func (f *fakeEngine) Invoke(_ context.Context, _ contract.Principal, request con
 	return f.invokeResult, f.invokeErr
 }
 
-func (f *fakeEngine) Stream(_ context.Context, _ contract.Principal, request contract.Request) (llmgateway.EventStream, error) {
+func (f *fakeEngine) Stream(_ context.Context, _ contract.Principal, request contract.Request) (contract.EventStream, error) {
 	f.streamRequest = request
 	return f.stream, f.streamErr
 }
@@ -89,7 +88,7 @@ func testSnapshot(t *testing.T) *catalog.Snapshot {
 	return snapshot
 }
 
-func testHandler(t *testing.T, engine *fakeEngine, authenticator llmgateway.Authenticator) http.Handler {
+func testHandler(t *testing.T, engine *fakeEngine, authenticator Authenticator) http.Handler {
 	t.Helper()
 	handler, err := NewHandler(engine, authenticator, Options{NewRequestID: func() (contract.ID, error) { return "req_generated", nil }})
 	if err != nil {
@@ -144,6 +143,22 @@ func TestAuthenticationAndRoutingErrorsUseOpenAIShape(t *testing.T) {
 				t.Fatalf("not an OpenAI error response: %#v", value)
 			}
 		})
+	}
+}
+
+func TestInvalidRequestIDIsRejectedInsteadOfSilentlyReplaced(t *testing.T) {
+	handler := testHandler(t, &fakeEngine{snapshot: testSnapshot(t)}, fakeAuthenticator{})
+	request := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	request.Header.Set("X-Request-ID", "contains whitespace")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+	value := decodeObject(t, response)
+	errorObject := value["error"].(map[string]any)
+	if errorObject["code"] != string(contract.ErrorInvalidRequest) {
+		t.Fatalf("error = %#v", errorObject)
 	}
 }
 
