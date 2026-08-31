@@ -408,7 +408,11 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 		return contract.Response{}, err
 	}
 	cacheKey, cached, cacheHit := e.lookupCache(ctx, principal, prepared)
-	prepared, err = e.admit(ctx, principal, prepared)
+	if cacheHit {
+		prepared, err = e.admitCached(ctx, principal, prepared, cached.Usage)
+	} else {
+		prepared, err = e.admit(ctx, principal, prepared)
+	}
 	if err != nil {
 		return contract.Response{}, err
 	}
@@ -607,6 +611,21 @@ func (e *Engine) admit(ctx context.Context, principal contract.Principal, prepar
 	if exposureErr != nil {
 		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "usage estimate exceeds supported range", 400, false, exposureErr)
 	}
+	prepared.request.EstimatedUsage = attemptEstimate
+	prepared.plan = plan
+	prepared.attemptExposure = attemptExposure
+	return e.reserve(ctx, principal, prepared, exposure)
+}
+
+func (e *Engine) admitCached(ctx context.Context, principal contract.Principal, prepared preparedRequest, usage contract.Usage) (preparedRequest, error) {
+	if normalizeErr := normalizeTokenTotal(&usage); normalizeErr != nil || !usage.Valid() {
+		return preparedRequest{}, publicError(contract.ErrorInternal, "cached usage is invalid", 500, false, normalizeErr)
+	}
+	usage.CostMicros = 0
+	return e.reserve(ctx, principal, prepared, usage)
+}
+
+func (e *Engine) reserve(ctx context.Context, principal contract.Principal, prepared preparedRequest, exposure contract.Usage) (preparedRequest, error) {
 	bindings, err := policyBindings(prepared.runtime.catalog, principal, prepared.model)
 	if err != nil {
 		return preparedRequest{}, publicError(contract.ErrorInternal, "invalid effective policy", 500, false, err)
@@ -628,11 +647,8 @@ func (e *Engine) admit(ctx context.Context, principal contract.Principal, prepar
 		}
 		return preparedRequest{}, publicError(contract.ErrorInternal, "accounting admission failed", 500, false, err)
 	}
-	prepared.request.EstimatedUsage = attemptEstimate
-	prepared.plan = plan
 	prepared.token = token
 	prepared.reserved = exposure
-	prepared.attemptExposure = attemptExposure
 	return prepared, nil
 }
 

@@ -2,11 +2,13 @@ package llmgateway_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/daptin/llmgateway"
 	"github.com/daptin/llmgateway/adapter"
+	exactcache "github.com/daptin/llmgateway/cache"
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
 	"github.com/daptin/llmgateway/guardrail"
@@ -70,6 +72,73 @@ func TestExactCacheHitUsesSameAccountingPathAndCannotCrossKeys(t *testing.T) {
 	}
 	if other.Chat.ID != "other-tenant" || len(provider.Attempts()) != 2 {
 		t.Fatalf("cache crossed API keys: response=%#v attempts=%v", other, provider.Attempts())
+	}
+}
+
+func TestExactCacheAdmissionUsesCachedUsageInsteadOfRetryExposure(t *testing.T) {
+	document := testDocument()
+	document.Models[0].Capabilities = map[string]bool{"exact_cache": true}
+	document.Models[0].PolicyID = "model-budget"
+	document.Policies = []catalog.Policy{{ID: "model-budget", Name: "model budget", Limits: []catalog.Limit{{
+		Metric: "total_tokens", Window: "1m", Maximum: 3, Mode: "hard",
+	}}}}
+	document.Deployments = append(document.Deployments, catalog.Deployment{
+		ID: "d2", Name: "second", ProviderID: "p", ModelID: "m", UpstreamModel: "other",
+		Operations: []contract.Operation{contract.OperationChat}, Weight: 1, MaxConcurrency: -1, RPM: -1, TPM: -1, Enabled: true,
+	})
+	provider := testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})
+	registry := adapter.NewRegistry()
+	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) { return provider, nil })); err != nil {
+		t.Fatal(err)
+	}
+	clock := testkit.NewAutoClock(time.Now())
+	accounting := testkit.NewAccountingStore()
+	responseCache := testkit.NewResponseCache(clock.Now)
+	engine, err := llmgateway.New(llmgateway.Dependencies{
+		Catalog: testkit.NewCatalogSource(document), Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Accounting: accounting,
+		Counters: testkit.NewCounterStore(clock.Now), Cache: responseCache, Guardrails: guardrail.NewRegistry(),
+		Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
+	}, llmgateway.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	zero := 0.0
+	request := chatRequest("cached-budget", false)
+	request.Chat.MaxCompletionTokens = 1
+	request.Chat.Temperature = &zero
+	request.EstimatedUsage = contract.Usage{InputTokens: 2, OutputTokens: 1, TotalTokens: 3, Estimated: true}
+	request.MaxOutputTokens = 1
+	snapshot, err := engine.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	model, _ := snapshot.ModelByName("model")
+	key, err := exactcache.Key(snapshot.Revision(), model, contract.Principal{KeyID: "key"}, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cached := contract.Response{RequestID: "original", Model: "model", Chat: &contract.ChatResponse{ID: "cached"}, Usage: contract.Usage{InputTokens: 2, OutputTokens: 1, TotalTokens: 3}}
+	payload, err := json.Marshal(cached)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := responseCache.Set(context.Background(), key, payload, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	response, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completion, ok := accounting.Completion(request.ID)
+	if response.Chat == nil || response.Chat.ID != "cached" || !ok || completion.CacheStatus != "hit" ||
+		completion.Usage.TotalTokens != 3 || completion.Usage.CostMicros != 0 || len(completion.Attempts) != 0 {
+		t.Fatalf("response=%+v completion=%+v present=%v", response, completion, ok)
+	}
+	if attempts := provider.Attempts(); len(attempts) != 0 {
+		t.Fatalf("cached request called provider: %v", attempts)
 	}
 }
 
