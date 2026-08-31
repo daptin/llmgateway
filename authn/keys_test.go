@@ -60,3 +60,22 @@ func TestMalformedKeysAreRejected(t *testing.T) {
 		}
 	}
 }
+
+func TestParsePrefixAllowsURLSafeUnderscore(t *testing.T) {
+	pepper := bytes.Repeat([]byte{1}, 32)
+	random := bytes.NewReader(append(bytes.Repeat([]byte{0xff}, prefixBytes), bytes.Repeat([]byte{3}, secretBytes)...))
+	ring, err := newKeyring("primary", []Pepper{{ID: "primary", Value: pepper}}, random)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, err := ring.Generate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(generated.Prefix, "_") {
+		t.Fatalf("fixture prefix does not exercise underscore: %q", generated.Prefix)
+	}
+	if prefix, err := ParsePrefix(generated.Secret.Bytes()); err != nil || prefix != generated.Prefix {
+		t.Fatalf("prefix=%q err=%v", prefix, err)
+	}
+}

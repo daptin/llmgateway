@@ -93,15 +93,15 @@ func ParsePrefix(plaintext []byte) (string, error) {
 		return "", errors.New("invalid gateway key format")
 	}
 	rest := strings.TrimPrefix(value, keyMarker)
-	separator := strings.IndexByte(rest, '_')
-	if separator <= 0 || separator == len(rest)-1 {
+	prefixLength := base64.RawURLEncoding.EncodedLen(prefixBytes)
+	if len(rest) <= prefixLength || rest[prefixLength] != '_' {
 		return "", errors.New("invalid gateway key format")
 	}
-	prefix := rest[:separator]
+	prefix := rest[:prefixLength]
 	if decoded, err := base64.RawURLEncoding.DecodeString(prefix); err != nil || len(decoded) != prefixBytes {
 		return "", errors.New("invalid gateway key prefix")
 	}
-	if decoded, err := base64.RawURLEncoding.DecodeString(rest[separator+1:]); err != nil || len(decoded) != secretBytes {
+	if decoded, err := base64.RawURLEncoding.DecodeString(rest[prefixLength+1:]); err != nil || len(decoded) != secretBytes {
 		return "", errors.New("invalid gateway key secret")
 	}
 	return prefix, nil
