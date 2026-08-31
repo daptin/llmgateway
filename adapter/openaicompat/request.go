@@ -1,11 +1,21 @@
 package openaicompat
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
+	"github.com/daptin/llmgateway/internal/jsonx"
 )
+
+type deploymentParameters struct {
+	Chat            map[string]json.RawMessage `json:"chat,omitempty"`
+	Responses       map[string]json.RawMessage `json:"responses,omitempty"`
+	Embeddings      map[string]json.RawMessage `json:"embeddings,omitempty"`
+	ImageGeneration map[string]json.RawMessage `json:"image_generation,omitempty"`
+}
 
 func encodeRequest(deployment catalog.Deployment, request contract.Request) ([]byte, string, error) {
 	var value map[string]any
@@ -26,11 +36,76 @@ func encodeRequest(deployment catalog.Deployment, request contract.Request) ([]b
 	default:
 		return nil, "", invalidRequest("unsupported operation", nil)
 	}
+	parameters, err := parseDeploymentParameters(deployment.Parameters)
+	if err != nil {
+		return nil, "", invalidRequest("invalid deployment parameters", err)
+	}
+	for key, raw := range parameters.forOperation(request.Operation) {
+		if _, exists := value[key]; exists {
+			return nil, "", invalidRequest(fmt.Sprintf("deployment parameter %q conflicts with a canonical request field", key), nil)
+		}
+		value[key] = raw
+	}
 	payload, err := json.Marshal(value)
 	if err != nil {
 		return nil, "", invalidRequest("failed to encode upstream request", err)
 	}
 	return payload, path, nil
+}
+
+func parseDeploymentParameters(raw json.RawMessage) (deploymentParameters, error) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("{}")) {
+		return deploymentParameters{}, nil
+	}
+	var parameters deploymentParameters
+	if err := jsonx.DecodeOne(bytes.NewReader(trimmed), &parameters); err != nil {
+		return deploymentParameters{}, fmt.Errorf("invalid OpenAI-compatible deployment parameters: %w", err)
+	}
+	for operation, values := range map[contract.Operation]map[string]json.RawMessage{
+		contract.OperationChat: parameters.Chat, contract.OperationResponses: parameters.Responses,
+		contract.OperationEmbeddings: parameters.Embeddings, contract.OperationImageGeneration: parameters.ImageGeneration,
+	} {
+		for key := range values {
+			if key == "" {
+				return deploymentParameters{}, fmt.Errorf("%s deployment parameters contain an empty field", operation)
+			}
+			if _, canonical := canonicalRequestFields[operation][key]; canonical {
+				return deploymentParameters{}, fmt.Errorf("%s deployment parameter %q conflicts with a canonical request field", operation, key)
+			}
+		}
+	}
+	return parameters, nil
+}
+
+func (parameters deploymentParameters) forOperation(operation contract.Operation) map[string]json.RawMessage {
+	switch operation {
+	case contract.OperationChat:
+		return parameters.Chat
+	case contract.OperationResponses:
+		return parameters.Responses
+	case contract.OperationEmbeddings:
+		return parameters.Embeddings
+	case contract.OperationImageGeneration:
+		return parameters.ImageGeneration
+	default:
+		return nil
+	}
+}
+
+var canonicalRequestFields = map[contract.Operation]map[string]struct{}{
+	contract.OperationChat:            fieldSet("model", "messages", "stream", "stream_options", "tools", "tool_choice", "response_format", "n", "temperature", "top_p", "frequency_penalty", "presence_penalty", "max_completion_tokens", "stop", "user", "seed", "logprobs", "top_logprobs", "parallel_tool_calls", "reasoning_effort"),
+	contract.OperationResponses:       fieldSet("model", "input", "stream", "store", "instructions", "tools", "tool_choice", "text", "max_output_tokens", "temperature", "top_p", "parallel_tool_calls", "reasoning"),
+	contract.OperationEmbeddings:      fieldSet("model", "input", "encoding_format", "dimensions", "user"),
+	contract.OperationImageGeneration: fieldSet("model", "prompt", "n", "response_format", "size", "quality"),
+}
+
+func fieldSet(fields ...string) map[string]struct{} {
+	result := make(map[string]struct{}, len(fields))
+	for _, field := range fields {
+		result[field] = struct{}{}
+	}
+	return result
 }
 
 func encodeChatRequest(model string, request contract.Request) map[string]any {

@@ -121,7 +121,7 @@ func (h *Handler) chatCompletions(response http.ResponseWriter, request *http.Re
 		writeError(response, gatewayError(contract.ErrorInvalidRequest, "invalid chat completion request", http.StatusBadRequest, false, err), id)
 		return
 	}
-	canonical, includeUsage, err := h.canonicalChat(id, wire, int64(len(body)))
+	canonical, includeUsage, err := canonicalChat(id, wire, int64(len(body)))
 	if err != nil {
 		writeError(response, err, id)
 		return
@@ -143,7 +143,7 @@ func (h *Handler) chatCompletions(response http.ResponseWriter, request *http.Re
 	writeJSON(response, http.StatusOK, id, encoded)
 }
 
-func (h *Handler) canonicalChat(id contract.ID, wire chatRequest, requestBytes int64) (contract.Request, bool, error) {
+func canonicalChat(id contract.ID, wire chatRequest, requestBytes int64) (contract.Request, bool, error) {
 	if strings.TrimSpace(wire.Model) == "" || len(wire.Messages) == 0 {
 		return contract.Request{}, false, gatewayError(contract.ErrorInvalidRequest, "model and messages are required", http.StatusBadRequest, false, nil)
 	}
@@ -226,9 +226,13 @@ func (h *Handler) canonicalChat(id contract.ID, wire chatRequest, requestBytes i
 		return contract.Request{}, false, gatewayError(contract.ErrorInvalidRequest, "stream_options requires stream=true", http.StatusBadRequest, false, nil)
 	}
 	estimatedInput := requestBytes
+	estimatedOutput := maximum
+	if wire.N != nil {
+		estimatedOutput *= int64(n)
+	}
 	return contract.Request{
 		ID: id, Operation: contract.OperationChat, PublicModel: wire.Model, Stream: wire.Stream,
-		MaxOutputTokens: maximum, EstimatedUsage: contract.Usage{InputTokens: estimatedInput, OutputTokens: maximum * int64(n), TotalTokens: estimatedInput + maximum*int64(n), Estimated: true},
+		MaxOutputTokens: maximum, EstimatedUsage: contract.Usage{InputTokens: estimatedInput, OutputTokens: estimatedOutput, TotalTokens: estimatedInput + estimatedOutput, Estimated: true},
 		Chat: chat,
 	}, includeUsage, nil
 }

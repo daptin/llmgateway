@@ -54,6 +54,12 @@ type HealthChecker interface {
 	HealthCheck(context.Context, catalog.Deployment) error
 }
 
+// IdleConnectionCloser releases adapter-owned idle network connections after
+// a runtime snapshot is no longer reachable by an in-flight request.
+type IdleConnectionCloser interface {
+	CloseIdleConnections()
+}
+
 // DeploymentValidator lets an adapter reject adapter-specific deployment
 // configuration while a complete snapshot is being built. The same adapter
 // remains responsible for defensive validation when invoked directly.

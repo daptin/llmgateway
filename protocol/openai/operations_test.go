@@ -45,11 +45,12 @@ func TestEmbeddingsProtocol(t *testing.T) {
 		Usage: contract.Usage{InputTokens: 3, TotalTokens: 3},
 	}}
 	handler := testHandler(t, engine, fakeAuthenticator{})
-	response := perform(handler, http.MethodPost, "/v1/embeddings", `{"model":"allowed","input":[[1,2,3]],"dimensions":2,"encoding_format":"base64"}`, "key")
+	response := perform(handler, http.MethodPost, "/v1/embeddings", `{"model":"allowed","input":[[1,2,3]],"dimensions":2,"encoding_format":"base64","user":"user-1"}`, "key")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	if engine.invokeRequest.Embeddings == nil || engine.invokeRequest.Embeddings.Dimensions != 2 || len(engine.invokeRequest.Embeddings.Input.Tokens) != 1 {
+	if engine.invokeRequest.Embeddings == nil || engine.invokeRequest.Embeddings.Dimensions != 2 || engine.invokeRequest.Embeddings.EncodingFormat != "base64" ||
+		engine.invokeRequest.Embeddings.User != "user-1" || len(engine.invokeRequest.Embeddings.Input.Tokens) != 1 {
 		t.Fatalf("canonical request = %#v", engine.invokeRequest)
 	}
 	want := `{"data":[{"embedding":"AAAA","index":0,"object":"embedding"}],"model":"allowed","object":"list","usage":{"prompt_tokens":3,"completion_tokens":0,"total_tokens":3}}`
@@ -65,7 +66,9 @@ func TestImageGenerationProtocol(t *testing.T) {
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
 	}
-	if engine.invokeRequest.ImageGeneration == nil || engine.invokeRequest.ImageGeneration.ResponseFormat != "b64_json" {
+	if engine.invokeRequest.ImageGeneration == nil || engine.invokeRequest.PublicModel != "allowed" || engine.invokeRequest.ImageGeneration.Prompt != "a cat" ||
+		engine.invokeRequest.ImageGeneration.N != 1 || engine.invokeRequest.ImageGeneration.Size != "1024x1024" ||
+		engine.invokeRequest.ImageGeneration.Quality != "hd" || engine.invokeRequest.ImageGeneration.ResponseFormat != "b64_json" {
 		t.Fatalf("canonical request = %#v", engine.invokeRequest)
 	}
 	assertJSONEqual(t, response.Body.String(), `{"created":100,"data":[{"b64_json":"image","revised_prompt":"clean prompt"}]}`)
@@ -88,7 +91,7 @@ func TestResponsesRejectStateAndPreserveTypedInput(t *testing.T) {
 			t.Fatalf("stateful request was not explicitly rejected: %d %s", stateful.Code, stateful.Body.String())
 		}
 	}
-	body := `{"model":"allowed","instructions":"be concise","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"weather"},{"type":"input_image","image_url":"https://example.test/sky.png","detail":"low"}]},{"type":"function_call_output","call_id":"call_1","output":"sunny"}],"tools":[{"type":"function","name":"weather","parameters":{"type":"object"}}],"text":{"format":{"type":"json_schema","name":"forecast","schema":{"type":"object"}}},"temperature":0.4,"top_p":0.8,"parallel_tool_calls":false,"reasoning":{"effort":"low"},"max_output_tokens":20}`
+	body := `{"model":"allowed","instructions":"be concise","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"weather"},{"type":"input_image","image_url":"https://example.test/sky.png","detail":"low"}]},{"type":"function_call_output","call_id":"call_1","output":"sunny"}],"tools":[{"type":"function","name":"weather","parameters":{"type":"object"}}],"tool_choice":{"type":"function","name":"weather"},"text":{"format":{"type":"json_schema","name":"forecast","schema":{"type":"object"}}},"temperature":0.4,"top_p":0.8,"parallel_tool_calls":false,"reasoning":{"effort":"low"},"max_output_tokens":20}`
 	response := perform(handler, http.MethodPost, "/v1/responses", body, "key")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
@@ -96,7 +99,8 @@ func TestResponsesRejectStateAndPreserveTypedInput(t *testing.T) {
 	request := engine.invokeRequest
 	if request.Responses == nil || len(request.Responses.Input) != 2 || request.Responses.TextFormat.JSONSchema.Name != "forecast" || request.MaxOutputTokens != 20 ||
 		request.Responses.Temperature == nil || *request.Responses.Temperature != 0.4 || request.Responses.TopP == nil || *request.Responses.TopP != 0.8 ||
-		request.Responses.ParallelToolCalls == nil || *request.Responses.ParallelToolCalls || request.Responses.ReasoningEffort != "low" {
+		request.Responses.ParallelToolCalls == nil || *request.Responses.ParallelToolCalls || request.Responses.ReasoningEffort != "low" ||
+		request.Responses.ToolChoice == nil || request.Responses.ToolChoice.FunctionName != "weather" {
 		t.Fatalf("canonical request = %#v", request)
 	}
 	assertJSONEqual(t, response.Body.String(), `{"id":"resp_1","model":"allowed","object":"response","output":[{"content":[{"annotations":[],"text":"sunny","type":"output_text"}],"id":"msg_1","role":"assistant","status":"completed","type":"message"}],"status":"completed","usage":{"input_tokens":5,"output_tokens":1,"total_tokens":6}}`)
@@ -131,6 +135,19 @@ func TestResponsesStreamingUsesNamedSSEEvents(t *testing.T) {
 		"event: response.completed\ndata: {\"response\":{\"id\":\"resp_s\",\"model\":\"allowed\",\"object\":\"response\",\"status\":\"completed\",\"usage\":{\"input_tokens\":2,\"output_tokens\":1,\"total_tokens\":3}},\"response_id\":\"resp_s\",\"sequence_number\":2,\"type\":\"response.completed\"}\n\n"
 	if response.Body.String() != want {
 		t.Fatalf("SSE mismatch\n got: %s\nwant: %s", response.Body.String(), want)
+	}
+}
+
+func TestResponsesStreamingFailureUsesNamedErrorEventAndCloses(t *testing.T) {
+	stream := &eventStream{err: &contract.Error{Code: contract.ErrorProvider, Message: "provider failed", HTTPStatus: http.StatusBadGateway}}
+	engine := &fakeEngine{snapshot: testSnapshot(t), stream: stream}
+	response := perform(testHandler(t, engine, fakeAuthenticator{}), http.MethodPost, "/v1/responses",
+		`{"model":"allowed","input":"hello","stream":true}`, "key")
+	if response.Code != http.StatusOK || !stream.closed {
+		t.Fatalf("status=%d closed=%v body=%s", response.Code, stream.closed, response.Body.String())
+	}
+	if !strings.HasPrefix(response.Body.String(), "event: error\ndata: ") || !strings.Contains(response.Body.String(), `"code":"provider_error"`) {
+		t.Fatalf("invalid streaming error event: %s", response.Body.String())
 	}
 }
 

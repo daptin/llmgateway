@@ -26,7 +26,6 @@ type liveMatrix struct {
 
 type liveProvider struct {
 	Name               string          `json:"name"`
-	BaseURL            string          `json:"base_url"`
 	APIKeyEnv          string          `json:"api_key_env"`
 	ProviderParameters json.RawMessage `json:"provider_parameters,omitempty"`
 	Cases              []liveCase      `json:"cases"`
@@ -64,7 +63,7 @@ func TestLiveProviderMatrix(t *testing.T) {
 				t.Fatalf("%s is required for the live provider gate", provider.APIKeyEnv)
 			}
 			built, err := (Factory{}).Build(context.Background(), catalog.Provider{
-				ID: contract.ID(provider.Name), Name: provider.Name, Type: "openai-compatible", BaseURL: provider.BaseURL,
+				ID: contract.ID(provider.Name), Name: provider.Name, Type: provider.Name,
 				SecretRef: provider.APIKeyEnv, Parameters: provider.ProviderParameters, Enabled: true,
 			}, baseadapter.NewSecret([]byte(key)))
 			if err != nil {

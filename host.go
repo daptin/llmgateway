@@ -30,11 +30,12 @@ type Authorizer interface {
 	Authorize(context.Context, contract.Principal, catalog.Model) error
 }
 
-type AccountingStore interface {
+// MeteringPort is implemented by the host. The gateway reports admission and
+// terminal usage facts; the host alone owns policy evaluation and persistence.
+type MeteringPort interface {
 	Admit(context.Context, contract.Admission) (contract.ReservationToken, error)
-	Finalize(context.Context, contract.Completion) error
+	Complete(context.Context, contract.Completion) error
 	Cancel(context.Context, contract.Cancellation) error
-	ReapExpired(context.Context, time.Time, int) (contract.ReapResult, error)
 }
 
 type CounterStore interface {

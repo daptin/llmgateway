@@ -36,7 +36,7 @@ func main() {
 	clock := llmgateway.SystemClock{}
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(document), Adapters: registry,
-		Authorizer: testkit.AllowAuthorizer{}, Accounting: testkit.NewAccountingStore(), Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
+		Authorizer: testkit.AllowAuthorizer{}, Metering: testkit.NewMeteringRecorder(), Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
 		Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
 	}, llmgateway.Options{})
 	if err != nil {

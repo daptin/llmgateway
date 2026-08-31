@@ -41,7 +41,7 @@ func healthEngine(t *testing.T, provider adapter.Adapter, counters llmgateway.Co
 		t.Fatal(err)
 	}
 	engine, err := llmgateway.New(llmgateway.Dependencies{Catalog: testkit.NewCatalogSource(document), Adapters: registry,
-		Authorizer: testkit.AllowAuthorizer{}, Accounting: testkit.NewAccountingStore(), Counters: counters,
+		Authorizer: testkit.AllowAuthorizer{}, Metering: testkit.NewMeteringRecorder(), Counters: counters,
 		Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{},
 		Selector: testkit.NewSelector(0), Clock: llmgateway.SystemClock{}}, options)
 	if err != nil {
@@ -113,7 +113,7 @@ func TestProbeHonorsPerDeploymentInterval(t *testing.T) {
 	clock := testkit.NewClock(time.Date(2026, 8, 31, 0, 0, 0, 0, time.UTC))
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(document), Adapters: registry, Authorizer: testkit.AllowAuthorizer{},
-		Accounting: testkit.NewAccountingStore(), Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
+		Metering: testkit.NewMeteringRecorder(), Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
 		Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
 	}, llmgateway.Options{})
 	if err != nil {

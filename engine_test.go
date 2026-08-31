@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -33,11 +34,11 @@ func chatRequest(id string, stream bool) contract.Request {
 	}
 }
 
-func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, accounting *testkit.AccountingStore, sinks ...llmgateway.TelemetrySink) *llmgateway.Engine {
-	return newEngineForDocument(t, testDocument(), faultAdapter, accounting, sinks...)
+func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, metering *testkit.MeteringRecorder, sinks ...llmgateway.TelemetrySink) *llmgateway.Engine {
+	return newEngineForDocument(t, testDocument(), faultAdapter, metering, sinks...)
 }
 
-func newEngineForDocument(t *testing.T, document catalog.Document, faultAdapter *testkit.FaultAdapter, accounting *testkit.AccountingStore, sinks ...llmgateway.TelemetrySink) *llmgateway.Engine {
+func newEngineForDocument(t *testing.T, document catalog.Document, faultAdapter *testkit.FaultAdapter, metering *testkit.MeteringRecorder, sinks ...llmgateway.TelemetrySink) *llmgateway.Engine {
 	t.Helper()
 	registry := adapter.NewRegistry()
 	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) {
@@ -52,7 +53,7 @@ func newEngineForDocument(t *testing.T, document catalog.Document, faultAdapter 
 	}
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(document), Adapters: registry,
-		Authorizer: testkit.AllowAuthorizer{}, Accounting: accounting, Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
+		Authorizer: testkit.AllowAuthorizer{}, Metering: metering, Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
 		Guardrails: guardrail.NewRegistry(), Telemetry: telemetry, Selector: testkit.NewSelector(0), Clock: clock,
 	}, llmgateway.Options{})
 	if err != nil {
@@ -69,6 +70,20 @@ type captureTelemetry struct {
 type deploymentValidatingAdapter struct {
 	*testkit.FaultAdapter
 	err error
+}
+
+type closeTrackingAdapter struct {
+	*testkit.FaultAdapter
+	validationErr error
+	closes        atomic.Int64
+}
+
+func (adapter *closeTrackingAdapter) ValidateDeployment(catalog.Deployment) error {
+	return adapter.validationErr
+}
+
+func (adapter *closeTrackingAdapter) CloseIdleConnections() {
+	adapter.closes.Add(1)
 }
 
 func (a deploymentValidatingAdapter) ValidateDeployment(catalog.Deployment) error { return a.err }
@@ -90,7 +105,7 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "response"}, Usage: contract.Usage{InputTokens: 2, OutputTokens: 3, TotalTokens: 5}}},
 	)
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	engine := newEngine(t, faultAdapter, store)
 	handler, err := engine.Handler(llmgateway.HTTPOptions{Authenticator: llmgateway.AuthenticatorFunc(func(context.Context, string) (contract.Principal, error) {
 		return contract.Principal{}, nil
@@ -119,7 +134,7 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 		t.Fatal(err)
 	}
 	if response.Model != "model" || response.Usage.TotalTokens != 5 || store.State("request") != "finalized" {
-		t.Fatalf("response=%+v accounting=%s", response, store.State("request"))
+		t.Fatalf("response=%+v metering=%s", response, store.State("request"))
 	}
 	if err := engine.Drain(context.Background()); err != nil {
 		t.Fatal(err)
@@ -128,6 +143,71 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 		t.Fatalf("expected ErrDraining, got %v", err)
 	}
 	assertReadyStatus(t, handler, http.StatusServiceUnavailable)
+}
+
+func TestDrainBeforeFirstReloadIsIdempotent(t *testing.T) {
+	engine := newEngine(t, testkit.NewFaultAdapter(adapter.Capabilities{
+		Operations: map[contract.Operation]bool{contract.OperationChat: true},
+	}), testkit.NewMeteringRecorder())
+	if err := engine.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if status := engine.Status(); !status.Draining || status.Ready {
+		t.Fatalf("status after pre-reload drain = %+v", status)
+	}
+}
+
+func TestReloadAndDrainCloseOnlyUnreachableAdapterSnapshots(t *testing.T) {
+	document := testDocument()
+	source := testkit.NewCatalogSource(document)
+	first := &closeTrackingAdapter{FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})}
+	second := &closeTrackingAdapter{FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})}
+	failed := &closeTrackingAdapter{FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}}), validationErr: errors.New("invalid deployment")}
+	instances := []*closeTrackingAdapter{first, second, failed}
+	var build atomic.Int64
+	registry := adapter.NewRegistry()
+	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) {
+		return instances[int(build.Add(1))-1], nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	clock := testkit.NewAutoClock(time.Now())
+	engine, err := llmgateway.New(llmgateway.Dependencies{
+		Catalog: source, Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Metering: testkit.NewMeteringRecorder(),
+		Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(),
+		Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
+	}, llmgateway.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	document.Revision = 2
+	source.Set(document)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if first.closes.Load() != 1 || second.closes.Load() != 0 {
+		t.Fatalf("reload closes: first=%d second=%d", first.closes.Load(), second.closes.Load())
+	}
+	document.Revision = 3
+	source.Set(document)
+	if err := engine.Reload(context.Background()); err == nil {
+		t.Fatal("accepted invalid candidate adapter")
+	}
+	if failed.closes.Load() != 1 || second.closes.Load() != 0 {
+		t.Fatalf("rejected reload closes: failed=%d active=%d", failed.closes.Load(), second.closes.Load())
+	}
+	if err := engine.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if second.closes.Load() != 1 {
+		t.Fatalf("active adapter close count = %d, want 1", second.closes.Load())
+	}
 }
 
 func TestReloadRejectsInvalidAdapterDeploymentConfiguration(t *testing.T) {
@@ -144,7 +224,7 @@ func TestReloadRejectsInvalidAdapterDeploymentConfiguration(t *testing.T) {
 	clock := testkit.NewAutoClock(time.Now())
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(testDocument()), Adapters: registry, Authorizer: testkit.AllowAuthorizer{},
-		Accounting: testkit.NewAccountingStore(), Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
+		Metering: testkit.NewMeteringRecorder(), Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
 		Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
 	}, llmgateway.Options{})
 	if err != nil {
@@ -163,7 +243,7 @@ func TestInvokeConservativelySettlesMissingProviderUsage(t *testing.T) {
 		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "response"}}},
 	)
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	engine := newEngine(t, provider, store)
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
@@ -190,7 +270,7 @@ func TestEngineAppliesCompiledDefaultsOnceBeforeRoutingAndAccounting(t *testing.
 		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "response"}}},
 	)
-	engine := newEngineForDocument(t, document, provider, testkit.NewAccountingStore())
+	engine := newEngineForDocument(t, document, provider, testkit.NewMeteringRecorder())
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +297,7 @@ func TestEngineAppliesCompiledDefaultsOnceBeforeRoutingAndAccounting(t *testing.
 
 func TestInvokeRejectsModelCapabilityBeforeAdmission(t *testing.T) {
 	provider := testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	engine := newEngine(t, provider, store)
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
@@ -230,7 +310,7 @@ func TestInvokeRejectsModelCapabilityBeforeAdmission(t *testing.T) {
 		t.Fatalf("error = %v", err)
 	}
 	if state := store.State(request.ID); state != "" {
-		t.Fatalf("unsupported request reached accounting: %s", state)
+		t.Fatalf("unsupported request reached metering: %s", state)
 	}
 }
 
@@ -252,7 +332,7 @@ func TestModelParameterPoliciesAreExplicitAndDoNotMutateCaller(t *testing.T) {
 				adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}, Features: test.features},
 				testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "response"}, Usage: contract.Usage{TotalTokens: 1}}},
 			)
-			engine := newEngineForDocument(t, document, provider, testkit.NewAccountingStore())
+			engine := newEngineForDocument(t, document, provider, testkit.NewMeteringRecorder())
 			if err := engine.Reload(context.Background()); err != nil {
 				t.Fatal(err)
 			}
@@ -278,7 +358,7 @@ func TestDropPolicyRejectsSemanticCapabilityInput(t *testing.T) {
 	provider := testkit.NewFaultAdapter(adapter.Capabilities{
 		Operations: map[contract.Operation]bool{contract.OperationChat: true}, Features: map[string]bool{"vision": true},
 	})
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	engine := newEngineForDocument(t, document, provider, store)
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
@@ -289,7 +369,7 @@ func TestDropPolicyRejectsSemanticCapabilityInput(t *testing.T) {
 	_, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, request)
 	var public *contract.Error
 	if !errors.As(err, &public) || public.Code != contract.ErrorInvalidRequest || store.State(request.ID) != "" || len(provider.Requests()) != 0 {
-		t.Fatalf("error=%v accounting=%q requests=%d", err, store.State(request.ID), len(provider.Requests()))
+		t.Fatalf("error=%v metering=%q requests=%d", err, store.State(request.ID), len(provider.Requests()))
 	}
 }
 
@@ -297,7 +377,7 @@ func TestTerminalTelemetryHasStableSafeDimensions(t *testing.T) {
 	provider := testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		testkit.AdapterStep{Response: contract.Response{Usage: contract.Usage{InputTokens: 2, OutputTokens: 3, TotalTokens: 5}}})
 	sink := &captureTelemetry{}
-	engine := newEngine(t, provider, testkit.NewAccountingStore(), sink)
+	engine := newEngine(t, provider, testkit.NewMeteringRecorder(), sink)
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -349,9 +429,9 @@ func TestEngineRetriesOnlyRetryableFailure(t *testing.T) {
 	})); err != nil {
 		t.Fatal(err)
 	}
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	clock := testkit.NewAutoClock(time.Now())
-	engine, err := llmgateway.New(llmgateway.Dependencies{Catalog: source, Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Accounting: store, Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock}, llmgateway.Options{})
+	engine, err := llmgateway.New(llmgateway.Dependencies{Catalog: source, Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Metering: store, Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock}, llmgateway.Options{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -381,16 +461,12 @@ func TestEngineReservesBoundedExposureForEveryPossibleAttempt(t *testing.T) {
 		ID: "d2", Name: "second", ProviderID: "p", ModelID: "m", UpstreamModel: "other",
 		Operations: []contract.Operation{contract.OperationChat}, Weight: 1, MaxConcurrency: -1, RPM: -1, TPM: -1, Enabled: true,
 	})
-	document.Policies = []catalog.Policy{{
-		ID: "model-budget", Name: "model budget",
-		Limits: []catalog.Limit{{Metric: "total_tokens", Window: "1m", Maximum: 10, Mode: "hard"}},
-	}}
-	document.Models[0].PolicyID = "model-budget"
 	provider := testkit.NewFaultAdapter(
 		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "must-not-run"}}},
 	)
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
+	store.RejectAdmissions(llmgateway.ErrAdmissionDenied)
 	engine := newEngineForDocument(t, document, provider, store)
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
@@ -407,6 +483,10 @@ func TestEngineReservesBoundedExposureForEveryPossibleAttempt(t *testing.T) {
 	if attempts := provider.Attempts(); len(attempts) != 0 {
 		t.Fatalf("provider was called before reserving all retry exposure: %v", attempts)
 	}
+	admissions := store.Admissions()
+	if len(admissions) != 1 || admissions[0].EstimatedUsage.TotalTokens != 20 || admissions[0].ModelID != "m" {
+		t.Fatalf("admission did not carry bounded exposure and model identity: %+v", admissions)
+	}
 }
 
 func TestRejectedNewerCatalogDegradesReadinessWithoutReplacingSnapshot(t *testing.T) {
@@ -418,7 +498,7 @@ func TestRejectedNewerCatalogDegradesReadinessWithoutReplacingSnapshot(t *testin
 	}
 	clock := testkit.NewAutoClock(time.Now())
 	engine, err := llmgateway.New(llmgateway.Dependencies{
-		Catalog: source, Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Accounting: testkit.NewAccountingStore(),
+		Catalog: source, Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Metering: testkit.NewMeteringRecorder(),
 		Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(),
 		Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
 	}, llmgateway.Options{})
@@ -450,7 +530,7 @@ func TestEngineDoesNotRetryNonRetryableFailure(t *testing.T) {
 		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		testkit.AdapterStep{InvokeError: errors.New("bad request")},
 	)
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	engine := newEngine(t, faultAdapter, store)
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
@@ -463,7 +543,7 @@ func TestEngineDoesNotRetryNonRetryableFailure(t *testing.T) {
 		t.Fatalf("expected one attempt, got %v", attempts)
 	}
 	if store.State("request") != "finalized" {
-		t.Fatalf("accounting state=%s", store.State("request"))
+		t.Fatalf("metering state=%s", store.State("request"))
 	}
 }
 
@@ -472,7 +552,7 @@ func TestDrainWaitsForAdmittedStreamAndRejectsNewWork(t *testing.T) {
 		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}, Features: map[string]bool{"streaming": true}},
 		testkit.AdapterStep{Events: []contract.StreamEvent{{Chat: &contract.ChatDelta{ID: "chunk"}}}},
 	)
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	engine := newEngine(t, faultAdapter, store)
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
@@ -496,6 +576,6 @@ func TestDrainWaitsForAdmittedStreamAndRejectsNewWork(t *testing.T) {
 		t.Fatal(err)
 	}
 	if state := store.State("stream"); state != "cancelled" {
-		t.Fatalf("stream accounting state=%s", state)
+		t.Fatalf("stream metering state=%s", state)
 	}
 }

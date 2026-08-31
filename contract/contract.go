@@ -33,13 +33,6 @@ type Principal struct {
 	TeamID          ID
 	GroupIDs        []ID
 	AllowedModelIDs []ID
-	PolicyBindings  []PolicyBinding
-}
-
-type PolicyBinding struct {
-	ScopeKind string
-	ScopeID   ID
-	PolicyID  ID
 }
 
 type Request struct {
@@ -115,25 +108,12 @@ type Attempt struct {
 }
 
 type Admission struct {
-	RequestID         ID
-	Principal         Principal
-	ModelID           ID
-	Operation         Operation
-	StartedAt         time.Time
-	EstimatedUsage    Usage
-	LimitReservations []LimitReservation
-}
-
-type LimitReservation struct {
-	ScopeKind   string
-	ScopeID     ID
-	PolicyID    ID
-	Metric      string
-	Window      string
-	WindowStart time.Time
-	WindowEnd   time.Time
-	Maximum     int64
-	Amount      int64
+	RequestID      ID
+	Principal      Principal
+	ModelID        ID
+	Operation      Operation
+	StartedAt      time.Time
+	EstimatedUsage Usage
 }
 
 type ReservationToken struct {
@@ -159,9 +139,4 @@ type Cancellation struct {
 	Usage    Usage
 	Attempts []Attempt
 	EndedAt  time.Time
-}
-
-type ReapResult struct {
-	Examined int
-	Released int
 }

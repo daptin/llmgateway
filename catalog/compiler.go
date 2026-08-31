@@ -18,7 +18,6 @@ type Snapshot struct {
 	modelByName map[string]contract.ID
 	deployments map[contract.ID]Deployment
 	byModel     map[contract.ID][]contract.ID
-	policies    map[contract.ID]Policy
 	guardrails  map[contract.ID]Guardrail
 	defaults    map[contract.ID]modelDefaults
 }
@@ -31,8 +30,8 @@ func Compile(doc Document) (*Snapshot, error) {
 		revision: doc.Revision, providers: make(map[contract.ID]Provider),
 		models: make(map[contract.ID]Model), modelByName: make(map[string]contract.ID),
 		deployments: make(map[contract.ID]Deployment), byModel: make(map[contract.ID][]contract.ID),
-		policies: make(map[contract.ID]Policy), guardrails: make(map[contract.ID]Guardrail),
-		defaults: make(map[contract.ID]modelDefaults),
+		guardrails: make(map[contract.ID]Guardrail),
+		defaults:   make(map[contract.ID]modelDefaults),
 	}
 	for _, provider := range doc.Providers {
 		if err := validateProvider(provider); err != nil {
@@ -42,19 +41,6 @@ func Compile(doc Document) (*Snapshot, error) {
 			return nil, fmt.Errorf("duplicate provider id %q", provider.ID)
 		}
 		s.providers[provider.ID] = cloneProvider(provider)
-	}
-	for _, policy := range doc.Policies {
-		if policy.ID == "" || strings.TrimSpace(policy.Name) == "" {
-			return nil, errors.New("policy id and name are required")
-		}
-		if _, exists := s.policies[policy.ID]; exists {
-			return nil, fmt.Errorf("duplicate policy id %q", policy.ID)
-		}
-		if err := validateLimits(policy.Limits); err != nil {
-			return nil, fmt.Errorf("policy %q: %w", policy.ID, err)
-		}
-		policy.Limits = append([]Limit(nil), policy.Limits...)
-		s.policies[policy.ID] = policy
 	}
 	for _, model := range doc.Models {
 		if err := validateModel(model); err != nil {
@@ -69,11 +55,6 @@ func Compile(doc Document) (*Snapshot, error) {
 		}
 		if _, exists := s.modelByName[model.Name]; exists {
 			return nil, fmt.Errorf("duplicate public model name %q", model.Name)
-		}
-		if model.PolicyID != "" {
-			if _, exists := s.policies[model.PolicyID]; !exists {
-				return nil, fmt.Errorf("model %q references unknown policy %q", model.ID, model.PolicyID)
-			}
 		}
 		s.models[model.ID] = cloneModel(model)
 		s.defaults[model.ID] = defaults
@@ -187,15 +168,6 @@ func (s *Snapshot) Provider(id contract.ID) (Provider, bool) {
 		return Provider{}, false
 	}
 	return cloneProvider(provider), true
-}
-
-func (s *Snapshot) Policy(id contract.ID) (Policy, bool) {
-	policy, ok := s.policies[id]
-	if !ok {
-		return Policy{}, false
-	}
-	policy.Limits = append([]Limit(nil), policy.Limits...)
-	return policy, true
 }
 
 func (s *Snapshot) Providers() []Provider {
@@ -357,30 +329,6 @@ func validateDeployment(deployment Deployment, models map[contract.ID]Model, pro
 		if value < 0 {
 			return fmt.Errorf("deployment %q pricing cannot be negative", deployment.ID)
 		}
-	}
-	return nil
-}
-
-func validateLimits(limits []Limit) error {
-	seen := make(map[string]struct{}, len(limits))
-	for _, limit := range limits {
-		if strings.TrimSpace(limit.Metric) == "" {
-			return errors.New("limit metric is required")
-		}
-		if limit.Metric != "concurrency" && strings.TrimSpace(limit.Window) == "" {
-			return errors.New("limit window is required except for concurrency")
-		}
-		if limit.Maximum < 0 {
-			return errors.New("limit maximum cannot be negative")
-		}
-		if limit.Mode != "hard" && limit.Mode != "soft" {
-			return fmt.Errorf("invalid limit mode %q", limit.Mode)
-		}
-		key := limit.Metric + "\x00" + limit.Window
-		if _, exists := seen[key]; exists {
-			return fmt.Errorf("duplicate limit %s/%s", limit.Metric, limit.Window)
-		}
-		seen[key] = struct{}{}
 	}
 	return nil
 }

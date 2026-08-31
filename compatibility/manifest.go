@@ -2,11 +2,12 @@ package compatibility
 
 import (
 	_ "embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/daptin/llmgateway/internal/jsonx"
 )
 
 type Support string
@@ -53,14 +54,9 @@ func Default() (Manifest, error) {
 }
 
 func Decode(reader io.Reader) (Manifest, error) {
-	decoder := json.NewDecoder(reader)
-	decoder.DisallowUnknownFields()
 	var manifest Manifest
-	if err := decoder.Decode(&manifest); err != nil {
+	if err := jsonx.DecodeOne(reader, &manifest); err != nil {
 		return Manifest{}, err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return Manifest{}, errors.New("compatibility manifest must contain one JSON document")
 	}
 	if err := manifest.Validate(); err != nil {
 		return Manifest{}, err

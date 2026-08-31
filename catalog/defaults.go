@@ -2,12 +2,11 @@ package catalog
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 
 	"github.com/daptin/llmgateway/contract"
+	"github.com/daptin/llmgateway/internal/jsonx"
 )
 
 type modelDefaults struct {
@@ -55,14 +54,9 @@ func parseModelDefaults(model Model) (modelDefaults, error) {
 	if len(raw) == 0 {
 		return modelDefaults{}, nil
 	}
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
 	var defaults modelDefaults
-	if err := decoder.Decode(&defaults); err != nil {
+	if err := jsonx.DecodeOne(bytes.NewReader(raw), &defaults); err != nil {
 		return modelDefaults{}, fmt.Errorf("model %q default parameters: %w", model.ID, err)
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return modelDefaults{}, fmt.Errorf("model %q default parameters must contain one JSON object", model.ID)
 	}
 	if err := defaults.validate(); err != nil {
 		return modelDefaults{}, fmt.Errorf("model %q default parameters: %w", model.ID, err)

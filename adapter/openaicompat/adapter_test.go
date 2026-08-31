@@ -8,6 +8,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"sort"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,6 +17,7 @@ import (
 
 	baseadapter "github.com/daptin/llmgateway/adapter"
 	"github.com/daptin/llmgateway/catalog"
+	"github.com/daptin/llmgateway/compatibility"
 	"github.com/daptin/llmgateway/contract"
 )
 
@@ -26,6 +29,34 @@ func buildAdapter(t *testing.T, server *httptest.Server, parameters string, opti
 		t.Fatal(err)
 	}
 	return built.(*Adapter)
+}
+
+func TestManifestOperationsMatchOpenAICompatibleAdapter(t *testing.T) {
+	manifest, err := compatibility.Default()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var declared []string
+	for _, provider := range manifest.Providers {
+		if provider.Name != "openai-compatible" {
+			continue
+		}
+		for operation := range provider.Operations {
+			declared = append(declared, operation)
+		}
+	}
+	capabilities := (&Adapter{}).Capabilities()
+	implemented := make([]string, 0, len(capabilities.Operations))
+	for operation, supported := range capabilities.Operations {
+		if supported {
+			implemented = append(implemented, string(operation))
+		}
+	}
+	sort.Strings(declared)
+	sort.Strings(implemented)
+	if !reflect.DeepEqual(declared, implemented) {
+		t.Fatalf("manifest operations = %v, adapter capabilities = %v", declared, implemented)
+	}
 }
 
 func deployment() catalog.Deployment {
@@ -109,6 +140,69 @@ func TestBuildRequiresExplicitPrivateNetworkOptIn(t *testing.T) {
 	provider := catalog.Provider{ID: "p", Name: "provider", Type: "openai-compatible", BaseURL: "https://127.0.0.1/v1", Enabled: true}
 	if _, err := (Factory{}).Build(context.Background(), provider, baseadapter.NewSecret([]byte("secret"))); err == nil || !strings.Contains(err.Error(), "private-network") {
 		t.Fatalf("private provider error=%v", err)
+	}
+}
+
+func TestBuildUsesNamedProviderBaseURLsAndPreservesExplicitURL(t *testing.T) {
+	for providerType, expected := range providerBaseURLs {
+		built, err := (Factory{}).Build(context.Background(), catalog.Provider{
+			ID: "p", Name: "provider", Type: providerType, Enabled: true,
+		}, baseadapter.NewSecret([]byte("secret")))
+		if err != nil {
+			t.Fatalf("build %s: %v", providerType, err)
+		}
+		if actual := built.(*Adapter).baseURL.String(); actual != expected {
+			t.Fatalf("%s base URL = %q, want %q", providerType, actual, expected)
+		}
+	}
+	explicit := "https://gateway.example/v1"
+	built, err := (Factory{}).Build(context.Background(), catalog.Provider{
+		ID: "p", Name: "provider", Type: "google", BaseURL: explicit, Enabled: true,
+	}, baseadapter.NewSecret([]byte("secret")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if actual := built.(*Adapter).baseURL.String(); actual != explicit {
+		t.Fatalf("explicit base URL = %q, want %q", actual, explicit)
+	}
+	if _, err := (Factory{}).Build(context.Background(), catalog.Provider{
+		ID: "p", Name: "provider", Type: "openai-compatible", Enabled: true,
+	}, baseadapter.NewSecret([]byte("secret"))); err == nil {
+		t.Fatal("generic OpenAI-compatible provider accepted an empty base URL")
+	}
+}
+
+func TestDeploymentParametersAddOnlyOperationScopedExtensionFields(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		provider, ok := body["provider"].(map[string]any)
+		if !ok || provider["order"] != "latency" {
+			t.Fatalf("deployment extension was not preserved: %#v", body)
+		}
+		_, _ = io.WriteString(response, `{"id":"chatcmpl_1","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer server.Close()
+	built := buildAdapter(t, server, `{}`, Factory{})
+	configured := deployment()
+	configured.Parameters = json.RawMessage(`{"chat":{"provider":{"order":"latency"}}}`)
+	request := contract.Request{Operation: contract.OperationChat, Chat: &contract.ChatRequest{
+		Messages: []contract.Message{{Role: "user", Content: []contract.ContentPart{{Type: "text", Text: "hello"}}}},
+	}}
+	if _, err := built.Invoke(context.Background(), configured, request); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, raw := range []string{
+		`{"unknown":{}}`,
+		`{"chat":{"model":"shadow-model"}}`,
+	} {
+		configured.Parameters = json.RawMessage(raw)
+		if err := built.ValidateDeployment(configured); err == nil {
+			t.Fatalf("accepted invalid deployment parameters: %s", raw)
+		}
 	}
 }
 

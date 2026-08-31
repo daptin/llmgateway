@@ -13,7 +13,6 @@ type Document struct {
 	Providers   []Provider
 	Models      []Model
 	Deployments []Deployment
-	Policies    []Policy
 	Guardrails  []Guardrail
 }
 
@@ -39,7 +38,6 @@ type Model struct {
 	GuardrailIDs               []contract.ID
 	DefaultParameters          json.RawMessage
 	UnsupportedParameterPolicy string
-	PolicyID                   contract.ID
 	Enabled                    bool
 }
 
@@ -78,19 +76,6 @@ type Pricing struct {
 	CacheReadMicrosPerMillion  int64
 	CacheWriteMicrosPerMillion int64
 	ReasoningMicrosPerMillion  int64
-}
-
-type Policy struct {
-	ID     contract.ID
-	Name   string
-	Limits []Limit
-}
-
-type Limit struct {
-	Metric  string
-	Window  string
-	Maximum int64
-	Mode    string
 }
 
 type Guardrail struct {

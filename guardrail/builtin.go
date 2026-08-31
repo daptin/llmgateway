@@ -6,12 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"regexp"
 	"strings"
 
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
+	"github.com/daptin/llmgateway/internal/jsonx"
 )
 
 type PhraseFactory struct{}
@@ -194,15 +194,7 @@ func validateRuleConfig(mode string, patterns []string) error {
 }
 
 func strictConfig(raw json.RawMessage, destination any) error {
-	decoder := json.NewDecoder(bytes.NewReader(raw))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("guardrail config must contain one JSON document")
-	}
-	return nil
+	return jsonx.DecodeOne(bytes.NewReader(raw), destination)
 }
 
 func requestText(request contract.Request) string {

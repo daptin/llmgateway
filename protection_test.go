@@ -15,7 +15,7 @@ import (
 	"github.com/daptin/llmgateway/testkit"
 )
 
-func protectedEngine(t *testing.T, document catalog.Document, provider adapter.Adapter, accounting *testkit.AccountingStore, counters llmgateway.CounterStore, clock llmgateway.Clock, options llmgateway.Options) *llmgateway.Engine {
+func protectedEngine(t *testing.T, document catalog.Document, provider adapter.Adapter, metering *testkit.MeteringRecorder, counters llmgateway.CounterStore, clock llmgateway.Clock, options llmgateway.Options) *llmgateway.Engine {
 	t.Helper()
 	registry := adapter.NewRegistry()
 	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) { return provider, nil })); err != nil {
@@ -23,7 +23,7 @@ func protectedEngine(t *testing.T, document catalog.Document, provider adapter.A
 	}
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(document), Adapters: registry, Authorizer: testkit.AllowAuthorizer{},
-		Accounting: accounting, Counters: counters, Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
+		Metering: metering, Counters: counters, Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
 	}, options)
 	if err != nil {
 		t.Fatal(err)
@@ -46,8 +46,8 @@ func TestCircuitStateIsSharedAcrossEnginesAndHalfOpenRecovers(t *testing.T) {
 		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "ok"}, Usage: contract.Usage{TotalTokens: 1}}},
 	)
 	options := llmgateway.Options{CircuitFailures: 1, CircuitCooldown: time.Second, CircuitWindow: 10 * time.Second}
-	first := protectedEngine(t, testDocument(), failing, testkit.NewAccountingStore(), counters, clock, options)
-	second := protectedEngine(t, testDocument(), success, testkit.NewAccountingStore(), counters, clock, options)
+	first := protectedEngine(t, testDocument(), failing, testkit.NewMeteringRecorder(), counters, clock, options)
+	second := protectedEngine(t, testDocument(), success, testkit.NewMeteringRecorder(), counters, clock, options)
 	if _, err := first.Invoke(context.Background(), contract.Principal{}, chatRequest("first", false)); err == nil {
 		t.Fatal("expected first provider failure")
 	}
@@ -102,7 +102,7 @@ func TestConcurrencyAdmissionPreventsSecondProviderCall(t *testing.T) {
 	document.Deployments[0].MaxConcurrency = 1
 	clock := testkit.NewAutoClock(time.Now())
 	provider := &blockingAdapter{entered: make(chan struct{}, 1), release: make(chan struct{})}
-	engine := protectedEngine(t, document, provider, testkit.NewAccountingStore(), testkit.NewCounterStore(clock.Now), clock, llmgateway.Options{})
+	engine := protectedEngine(t, document, provider, testkit.NewMeteringRecorder(), testkit.NewCounterStore(clock.Now), clock, llmgateway.Options{})
 	firstDone := make(chan error, 1)
 	go func() {
 		_, err := engine.Invoke(context.Background(), contract.Principal{}, chatRequest("first", false))
@@ -135,7 +135,7 @@ func TestCounterFailureFailsClosedBeforeProvider(t *testing.T) {
 		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "must-not-run"}, Usage: contract.Usage{TotalTokens: 1}}},
 	)
-	engine := protectedEngine(t, testDocument(), provider, testkit.NewAccountingStore(), counters, clock, llmgateway.Options{})
+	engine := protectedEngine(t, testDocument(), provider, testkit.NewMeteringRecorder(), counters, clock, llmgateway.Options{})
 	_, err := engine.Invoke(context.Background(), contract.Principal{}, chatRequest("request", false))
 	var typed *contract.Error
 	if !errors.As(err, &typed) || typed.Code != contract.ErrorUnavailable {
@@ -161,7 +161,7 @@ func TestGateRejectionDoesNotCreateOrRenumberUpstreamAttempts(t *testing.T) {
 		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "ok"}, Usage: contract.Usage{TotalTokens: 1}}},
 	)
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	engine := protectedEngine(t, document, provider, store, counters, clock, llmgateway.Options{})
 	if _, err := engine.Invoke(context.Background(), contract.Principal{}, chatRequest("gated-route", false)); err != nil {
 		t.Fatal(err)

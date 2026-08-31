@@ -15,7 +15,7 @@ import (
 	"github.com/daptin/llmgateway/testkit"
 )
 
-func streamEngine(t *testing.T, document catalog.Document, provider adapter.Adapter, store *testkit.AccountingStore, options ...llmgateway.Options) *llmgateway.Engine {
+func streamEngine(t *testing.T, document catalog.Document, provider adapter.Adapter, store *testkit.MeteringRecorder, options ...llmgateway.Options) *llmgateway.Engine {
 	t.Helper()
 	registry := adapter.NewRegistry()
 	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) { return provider, nil })); err != nil {
@@ -28,7 +28,7 @@ func streamEngine(t *testing.T, document catalog.Document, provider adapter.Adap
 	}
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: testkit.NewCatalogSource(document), Adapters: registry, Authorizer: testkit.AllowAuthorizer{},
-		Accounting: store, Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
+		Metering: store, Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
 	}, configured)
 	if err != nil {
 		t.Fatal(err)
@@ -75,7 +75,7 @@ func TestStreamRetriesBeforeFirstEvent(t *testing.T) {
 		testkit.AdapterStep{TerminalError: &contract.Error{Code: contract.ErrorRateLimit, Message: "limited", HTTPStatus: 429, Retryable: true}},
 		testkit.AdapterStep{Events: []contract.StreamEvent{{Type: "content_delta", Chat: &contract.ChatDelta{Content: "ok"}}, {Type: "finish", Usage: &contract.Usage{TotalTokens: 1}, Terminal: true}}},
 	)
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	stream, err := streamEngine(t, document, fault, store).Stream(context.Background(), contract.Principal{}, chatRequest("request", true))
 	if err != nil {
 		t.Fatal(err)
@@ -103,7 +103,7 @@ func TestStreamRetriesBeforeFirstEvent(t *testing.T) {
 }
 
 func TestStreamFirstEventTimeoutFinalizesWithoutCommit(t *testing.T) {
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	_, err := streamEngine(t, testDocument(), waitingAdapter{}, store, llmgateway.Options{FirstEventTimeout: 10 * time.Millisecond}).Stream(
 		context.Background(), contract.Principal{}, chatRequest("first-timeout", true))
 	var gatewayError *contract.Error
@@ -116,7 +116,7 @@ func TestStreamFirstEventTimeoutFinalizesWithoutCommit(t *testing.T) {
 }
 
 func TestLogicalRequestDeadlineCoversStreamSetup(t *testing.T) {
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	_, err := streamEngine(t, testDocument(), waitingAdapter{}, store, llmgateway.Options{
 		RequestTimeout: 10 * time.Millisecond, FirstEventTimeout: time.Second,
 	}).Stream(context.Background(), contract.Principal{}, chatRequest("request-timeout", true))
@@ -130,7 +130,7 @@ func TestLogicalRequestDeadlineCoversStreamSetup(t *testing.T) {
 }
 
 func TestStreamIdleTimeoutTerminatesAfterCommit(t *testing.T) {
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	stream, err := streamEngine(t, testDocument(), waitingAdapter{first: true}, store, llmgateway.Options{StreamIdleTimeout: 10 * time.Millisecond}).Stream(
 		context.Background(), contract.Principal{}, chatRequest("idle-timeout", true))
 	if err != nil {
@@ -154,7 +154,7 @@ func TestStreamNeverRetriesAfterFirstEvent(t *testing.T) {
 		streamCapabilities(),
 		testkit.AdapterStep{Events: []contract.StreamEvent{{Type: "content_delta", Chat: &contract.ChatDelta{Content: "partial"}}}, TerminalError: &contract.Error{Code: contract.ErrorProvider, Message: "reset", HTTPStatus: 502, Retryable: true}},
 	)
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	stream, err := streamEngine(t, testDocument(), fault, store).Stream(context.Background(), contract.Principal{}, chatRequest("request", true))
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestStreamCloseCancelsAccounting(t *testing.T) {
 		streamCapabilities(),
 		testkit.AdapterStep{Events: []contract.StreamEvent{{Type: "content_delta", Chat: &contract.ChatDelta{Content: "partial"}}}},
 	)
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	stream, err := streamEngine(t, testDocument(), fault, store).Stream(context.Background(), contract.Principal{}, chatRequest("request", true))
 	if err != nil {
 		t.Fatal(err)
@@ -201,7 +201,7 @@ func TestStreamConservativelySettlesMissingProviderUsage(t *testing.T) {
 			{Type: "finish", Terminal: true},
 		}},
 	)
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	request := chatRequest("stream-missing-usage", true)
 	request.EstimatedUsage = contract.Usage{InputTokens: 5, OutputTokens: 13, TotalTokens: 18, Estimated: true}
 	stream, err := streamEngine(t, testDocument(), fault, store).Stream(context.Background(), contract.Principal{}, request)
@@ -229,7 +229,7 @@ func TestStreamSkipsBoundedPreambleUntilSemanticOutput(t *testing.T) {
 			{Type: "finish", Usage: &contract.Usage{InputTokens: 2, OutputTokens: 1, TotalTokens: 3}, Terminal: true},
 		}},
 	)
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	stream, err := streamEngine(t, testDocument(), fault, store).Stream(context.Background(), contract.Principal{}, chatRequest("preamble", true))
 	if err != nil {
 		t.Fatal(err)
@@ -251,7 +251,7 @@ func TestStreamRejectsTerminalPreambleWithoutCommit(t *testing.T) {
 	fault := testkit.NewFaultAdapter(streamCapabilities(), testkit.AdapterStep{Events: []contract.StreamEvent{
 		{Type: "usage", Usage: &contract.Usage{TotalTokens: 1}, Terminal: true},
 	}})
-	store := testkit.NewAccountingStore()
+	store := testkit.NewMeteringRecorder()
 	_, err := streamEngine(t, testDocument(), fault, store).Stream(context.Background(), contract.Principal{}, chatRequest("terminal-preamble", true))
 	var public *contract.Error
 	if !errors.As(err, &public) || public.Code != contract.ErrorProvider || store.State("terminal-preamble") != "finalized" {

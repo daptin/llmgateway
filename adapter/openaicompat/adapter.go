@@ -4,7 +4,6 @@ package openaicompat
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -18,12 +17,20 @@ import (
 	"github.com/daptin/llmgateway/adapter"
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
+	"github.com/daptin/llmgateway/internal/jsonx"
 )
 
 const (
 	defaultMaxResponseBytes = int64(32 << 20)
 	defaultMaxEventBytes    = 1 << 20
 )
+
+var providerBaseURLs = map[string]string{
+	"openai":     "https://api.openai.com/v1",
+	"openrouter": "https://openrouter.ai/api/v1",
+	"google":     "https://generativelanguage.googleapis.com/v1beta/openai",
+	"lilac":      "https://api.getlilac.com/v1",
+}
 
 type Factory struct {
 	Client           *http.Client
@@ -51,10 +58,15 @@ type Adapter struct {
 	allowPrivate     bool
 	clientsMu        sync.Mutex
 	clients          map[time.Duration]*http.Client
+	ownedTransports  []*http.Transport
 }
 
 func (f Factory) Build(_ context.Context, provider catalog.Provider, secret adapter.Secret) (adapter.Adapter, error) {
-	parsed, err := url.Parse(provider.BaseURL)
+	baseURL := strings.TrimSpace(provider.BaseURL)
+	if baseURL == "" {
+		baseURL = providerBaseURLs[provider.Type]
+	}
+	parsed, err := url.Parse(baseURL)
 	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
 		return nil, errors.New("OpenAI-compatible provider requires a valid base URL")
 	}
@@ -120,8 +132,8 @@ func (a *Adapter) Capabilities() adapter.Capabilities {
 }
 
 func (a *Adapter) ValidateDeployment(deployment catalog.Deployment) error {
-	if len(bytes.TrimSpace(deployment.Parameters)) > 0 && !bytes.Equal(bytes.TrimSpace(deployment.Parameters), []byte("{}")) {
-		return errors.New("OpenAI-compatible deployment parameters are not supported")
+	if _, err := parseDeploymentParameters(deployment.Parameters); err != nil {
+		return err
 	}
 	if deployment.HealthCheck.Path != "" {
 		parsed, err := url.Parse(deployment.HealthCheck.Path)
@@ -287,10 +299,22 @@ func (a *Adapter) clientFor(connectTimeout time.Duration) *http.Client {
 			clone.ResponseHeaderTimeout = connectTimeout
 		}
 		transport = clone
+		a.ownedTransports = append(a.ownedTransports, clone)
 	}
 	client := &http.Client{Transport: transport, CheckRedirect: rejectRedirect}
 	a.clients[connectTimeout] = client
 	return client
+}
+
+func (a *Adapter) CloseIdleConnections() {
+	a.clientsMu.Lock()
+	transports := a.ownedTransports
+	a.ownedTransports = nil
+	a.clients = make(map[time.Duration]*http.Client)
+	a.clientsMu.Unlock()
+	for _, transport := range transports {
+		transport.CloseIdleConnections()
+	}
 }
 
 func rejectRedirect(_ *http.Request, _ []*http.Request) error {
@@ -357,13 +381,5 @@ func readBounded(reader io.Reader, maximum int64) ([]byte, error) {
 }
 
 func decodeStrict(payload []byte, destination any) error {
-	decoder := json.NewDecoder(bytes.NewReader(payload))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("expected one JSON document")
-	}
-	return nil
+	return jsonx.DecodeOne(bytes.NewReader(payload), destination)
 }

@@ -3,10 +3,14 @@ package llmgateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"time"
 
 	exactcache "github.com/daptin/llmgateway/cache"
 	"github.com/daptin/llmgateway/contract"
 )
+
+const cacheFillPollInterval = 25 * time.Millisecond
 
 func (e *Engine) lookupCache(ctx context.Context, principal contract.Principal, prepared preparedRequest) (string, contract.Response, bool) {
 	stable := true
@@ -24,30 +28,88 @@ func (e *Engine) lookupCache(ctx context.Context, principal contract.Principal, 
 		e.recordCache(ctx, prepared.request, "key_error")
 		return "", contract.Response{}, false
 	}
+	response, found, status := e.readCache(ctx, key, prepared.request.Operation)
+	e.recordCache(ctx, prepared.request, status)
+	return key, response, found
+}
+
+func (e *Engine) readCache(ctx context.Context, key string, operation contract.Operation) (contract.Response, bool, string) {
 	cacheCtx, cancel := context.WithTimeout(ctx, e.cacheTimeout)
 	defer cancel()
 	payload, found, err := e.cache.Get(cacheCtx, key)
 	if err != nil {
-		e.recordCache(ctx, prepared.request, "get_error")
-		return key, contract.Response{}, false
+		return contract.Response{}, false, "get_error"
 	}
 	if !found {
-		e.recordCache(ctx, prepared.request, "miss")
-		return key, contract.Response{}, false
+		return contract.Response{}, false, "miss"
 	}
 	if len(payload) > e.maxCacheEntryBytes {
 		_ = e.cache.Delete(cacheCtx, key)
-		e.recordCache(ctx, prepared.request, "invalid")
-		return key, contract.Response{}, false
+		return contract.Response{}, false, "invalid"
 	}
 	var response contract.Response
-	if json.Unmarshal(payload, &response) != nil || !validCachedResponse(prepared.request.Operation, response) {
+	if json.Unmarshal(payload, &response) != nil || !validCachedResponse(operation, response) {
 		_ = e.cache.Delete(cacheCtx, key)
-		e.recordCache(ctx, prepared.request, "invalid")
-		return key, contract.Response{}, false
+		return contract.Response{}, false, "invalid"
 	}
-	e.recordCache(ctx, prepared.request, "hit")
-	return key, response, true
+	return response, true, "hit"
+}
+
+func (e *Engine) coordinateCacheFill(ctx context.Context, request contract.Request, key string) (contract.Response, bool, string) {
+	leaseKey := "llmgateway:cache-fill:" + key
+	lease, err := e.counters.Acquire(ctx, leaseKey, 1, e.requestTimeout)
+	if err == nil {
+		e.recordCache(ctx, request, "fill_owner")
+		return contract.Response{}, false, lease
+	}
+	if !errors.Is(err, ErrCounterLimit) {
+		e.recordCache(ctx, request, "fill_coordination_error")
+		return contract.Response{}, false, ""
+	}
+	e.recordCache(ctx, request, "fill_wait")
+	deadline := e.clock.Now().Add(e.cacheFillWait)
+	for {
+		remaining := deadline.Sub(e.clock.Now())
+		if remaining <= 0 {
+			e.recordCache(ctx, request, "fill_wait_timeout")
+			return contract.Response{}, false, ""
+		}
+		delay := cacheFillPollInterval
+		if remaining < delay {
+			delay = remaining
+		}
+		timer := e.clock.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return contract.Response{}, false, ""
+		case <-timer.C():
+		}
+		response, found, status := e.readCache(ctx, key, request.Operation)
+		if found {
+			e.recordCache(ctx, request, "coalesced_hit")
+			return response, true, ""
+		}
+		if status == "get_error" {
+			e.recordCache(ctx, request, "fill_coordination_error")
+			return contract.Response{}, false, ""
+		}
+		lease, err = e.counters.Acquire(ctx, leaseKey, 1, e.requestTimeout)
+		if err == nil {
+			e.recordCache(ctx, request, "fill_owner")
+			return contract.Response{}, false, lease
+		}
+		if !errors.Is(err, ErrCounterLimit) {
+			e.recordCache(ctx, request, "fill_coordination_error")
+			return contract.Response{}, false, ""
+		}
+	}
+}
+
+func (e *Engine) releaseCacheFill(ctx context.Context, lease string) {
+	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), e.finalizationTimeout)
+	defer cancel()
+	_ = e.counters.Release(releaseCtx, lease)
 }
 
 func (e *Engine) storeCache(ctx context.Context, key string, response contract.Response) {

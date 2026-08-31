@@ -2,7 +2,6 @@
   "providers": [
     {
       "name": "google",
-      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
       "api_key_env": "GOOGLE_API_KEY",
       "cases": [
         {"name":"chat","feature":"chat","model":"gemini-3.7-flash"},
@@ -17,7 +16,6 @@
     },
     {
       "name": "openrouter",
-      "base_url": "https://openrouter.ai/api/v1",
       "api_key_env": "OPENROUTER_API_KEY",
       "provider_parameters": {"image_generation_path":"/images"},
       "cases": [
@@ -37,7 +35,6 @@
     },
     {
       "name": "lilac",
-      "base_url": "https://api.getlilac.com/v1",
       "api_key_env": "LILAC_API_KEY",
       "cases": [
         {"name":"kimi-chat","feature":"chat","model":"moonshotai/kimi-k2.6"},

@@ -8,7 +8,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/daptin/llmgateway/accounting"
 	"github.com/daptin/llmgateway/adapter"
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
@@ -17,9 +16,10 @@ import (
 )
 
 var (
-	ErrDraining     = errors.New("llmgateway is draining")
-	ErrNotReady     = errors.New("llmgateway has no valid catalog snapshot")
-	ErrCounterLimit = errors.New("llmgateway transient counter limit exceeded")
+	ErrDraining        = errors.New("llmgateway is draining")
+	ErrNotReady        = errors.New("llmgateway has no valid catalog snapshot")
+	ErrCounterLimit    = errors.New("llmgateway transient counter limit exceeded")
+	ErrAdmissionDenied = errors.New("llmgateway metering admission denied")
 )
 
 type Dependencies struct {
@@ -27,7 +27,7 @@ type Dependencies struct {
 	Secrets    SecretResolver
 	Adapters   *adapter.Registry
 	Authorizer Authorizer
-	Accounting AccountingStore
+	Metering   MeteringPort
 	Counters   CounterStore
 	Cache      ResponseCache
 	Guardrails *guardrail.Registry
@@ -47,6 +47,7 @@ type Options struct {
 	CircuitCooldown        time.Duration
 	CacheTTL               time.Duration
 	CacheTimeout           time.Duration
+	CacheFillWait          time.Duration
 	MaxCacheEntryBytes     int
 	FirstEventTimeout      time.Duration
 	StreamIdleTimeout      time.Duration
@@ -58,6 +59,7 @@ type runtimeSnapshot struct {
 	catalog    *catalog.Snapshot
 	adapters   map[contract.ID]adapter.Adapter
 	guardrails map[contract.ID][]runtimeGuardrail
+	closeOnce  sync.Once
 }
 
 func (r *runtimeSnapshot) Capabilities(providerID contract.ID) (adapter.Capabilities, bool) {
@@ -68,12 +70,25 @@ func (r *runtimeSnapshot) Capabilities(providerID contract.ID) (adapter.Capabili
 	return value.Capabilities(), true
 }
 
+func (r *runtimeSnapshot) closeIdleConnections() {
+	if r == nil {
+		return
+	}
+	r.closeOnce.Do(func() {
+		for _, instance := range r.adapters {
+			if closer, ok := instance.(adapter.IdleConnectionCloser); ok {
+				closer.CloseIdleConnections()
+			}
+		}
+	})
+}
+
 type Engine struct {
 	catalog                CatalogSource
 	secrets                SecretResolver
 	adapters               *adapter.Registry
 	authorizer             Authorizer
-	accounting             AccountingStore
+	metering               MeteringPort
 	counters               CounterStore
 	cache                  ResponseCache
 	guardrails             *guardrail.Registry
@@ -90,6 +105,7 @@ type Engine struct {
 	circuitCooldown        time.Duration
 	cacheTTL               time.Duration
 	cacheTimeout           time.Duration
+	cacheFillWait          time.Duration
 	maxCacheEntryBytes     int
 	firstEventTimeout      time.Duration
 	streamIdleTimeout      time.Duration
@@ -107,14 +123,16 @@ type Engine struct {
 	activeMu               sync.Mutex
 	activeRequests         int64
 	drained                chan struct{}
+	retired                []*runtimeSnapshot
+	snapshotCloseOnce      sync.Once
 }
 
 func New(dependencies Dependencies, options Options) (*Engine, error) {
 	if dependencies.Catalog == nil {
 		return nil, errors.New("catalog source is required")
 	}
-	if dependencies.Adapters == nil || dependencies.Authorizer == nil || dependencies.Accounting == nil || dependencies.Counters == nil || dependencies.Cache == nil || dependencies.Guardrails == nil || dependencies.Telemetry == nil || dependencies.Selector == nil || dependencies.Clock == nil {
-		return nil, errors.New("adapters, authorizer, accounting, counters, cache, guardrails, telemetry, selector, and clock are required")
+	if dependencies.Adapters == nil || dependencies.Authorizer == nil || dependencies.Metering == nil || dependencies.Counters == nil || dependencies.Cache == nil || dependencies.Guardrails == nil || dependencies.Telemetry == nil || dependencies.Selector == nil || dependencies.Clock == nil {
+		return nil, errors.New("adapters, authorizer, metering, counters, cache, guardrails, telemetry, selector, and clock are required")
 	}
 	if options.MaxAttempts == 0 {
 		options.MaxAttempts = 3
@@ -164,8 +182,11 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 	if options.CacheTimeout == 0 {
 		options.CacheTimeout = 250 * time.Millisecond
 	}
-	if options.CacheTTL < 0 || options.CacheTimeout < 1 || options.MaxCacheEntryBytes < 1 {
-		return nil, errors.New("cache TTL and entry bound must be positive")
+	if options.CacheFillWait == 0 {
+		options.CacheFillWait = 5 * time.Second
+	}
+	if options.CacheTTL < 0 || options.CacheTimeout < 1 || options.CacheFillWait < 1 || options.MaxCacheEntryBytes < 1 {
+		return nil, errors.New("cache TTL, timeouts, and entry bound must be positive")
 	}
 	if options.FirstEventTimeout == 0 {
 		options.FirstEventTimeout = 30 * time.Second
@@ -194,12 +215,12 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 	close(drained)
 	return &Engine{
 		catalog: dependencies.Catalog, secrets: dependencies.Secrets, adapters: dependencies.Adapters,
-		authorizer: dependencies.Authorizer, accounting: dependencies.Accounting, counters: dependencies.Counters, cache: dependencies.Cache,
+		authorizer: dependencies.Authorizer, metering: dependencies.Metering, counters: dependencies.Counters, cache: dependencies.Cache,
 		guardrails: dependencies.Guardrails, telemetry: dependencies.Telemetry, selector: dependencies.Selector,
 		clock: dependencies.Clock, maxAttempts: options.MaxAttempts, defaultMaxOutputTokens: options.DefaultMaxOutputTokens, finalizationTimeout: options.FinalizationTimeout,
 		baseRetryDelay: options.BaseRetryDelay, maxRetryDelay: options.MaxRetryDelay,
 		circuitFailures: options.CircuitFailures, circuitWindow: options.CircuitWindow, circuitCooldown: options.CircuitCooldown,
-		cacheTTL: options.CacheTTL, cacheTimeout: options.CacheTimeout, maxCacheEntryBytes: options.MaxCacheEntryBytes,
+		cacheTTL: options.CacheTTL, cacheTimeout: options.CacheTimeout, cacheFillWait: options.CacheFillWait, maxCacheEntryBytes: options.MaxCacheEntryBytes,
 		firstEventTimeout: options.FirstEventTimeout, streamIdleTimeout: options.StreamIdleTimeout,
 		requestTimeout:     options.RequestTimeout,
 		healthProbeWorkers: options.HealthProbeWorkers, healthLast: make(map[contract.ID]time.Time), healthActive: make(map[contract.ID]bool),
@@ -229,7 +250,13 @@ func (e *Engine) Reload(ctx context.Context) error {
 		e.recordReloadFailure(document.Revision, "validate")
 		return err
 	}
-	instances := make(map[contract.ID]adapter.Adapter)
+	candidate := &runtimeSnapshot{catalog: compiled, adapters: make(map[contract.ID]adapter.Adapter)}
+	installed := false
+	defer func() {
+		if !installed {
+			candidate.closeIdleConnections()
+		}
+	}()
 	for _, provider := range compiled.Providers() {
 		if !provider.Enabled {
 			continue
@@ -263,13 +290,13 @@ func (e *Engine) Reload(ctx context.Context) error {
 			e.recordReloadFailure(document.Revision, "adapter_build")
 			return fmt.Errorf("provider %q adapter factory returned nil", provider.ID)
 		}
-		instances[provider.ID] = instance
+		candidate.adapters[provider.ID] = instance
 	}
 	for _, deployment := range compiled.Deployments() {
 		if !deployment.Enabled {
 			continue
 		}
-		instance := instances[deployment.ProviderID]
+		instance := candidate.adapters[deployment.ProviderID]
 		if validator, ok := instance.(adapter.DeploymentValidator); ok {
 			if validateErr := validator.ValidateDeployment(deployment); validateErr != nil {
 				e.recordReloadFailure(document.Revision, "deployment_config")
@@ -284,7 +311,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 			return fmt.Errorf("deployment %q enables health checks on an adapter without probe support", deployment.ID)
 		}
 	}
-	compiledGuardrails := make(map[contract.ID][]runtimeGuardrail)
+	candidate.guardrails = make(map[contract.ID][]runtimeGuardrail)
 	for _, model := range compiled.Models() {
 		for _, configuration := range compiled.GuardrailsForModel(model.ID) {
 			factory, ok := e.guardrails.Factory(configuration.Kind)
@@ -301,15 +328,18 @@ func (e *Engine) Reload(ctx context.Context) error {
 				e.recordReloadFailure(document.Revision, "guardrail_build")
 				return fmt.Errorf("guardrail %q factory returned nil", configuration.ID)
 			}
-			compiledGuardrails[model.ID] = append(compiledGuardrails[model.ID], runtimeGuardrail{configuration: configuration, checker: checker})
+			candidate.guardrails[model.ID] = append(candidate.guardrails[model.ID], runtimeGuardrail{configuration: configuration, checker: checker})
 		}
 	}
-	next := &runtimeSnapshot{catalog: compiled, adapters: instances, guardrails: compiledGuardrails}
 	current := e.snapshot.Load()
-	if current != nil && next.catalog.Revision() <= current.catalog.Revision() {
+	if current != nil && candidate.catalog.Revision() <= current.catalog.Revision() {
 		return catalog.ErrStaleRevision
 	}
-	e.snapshot.Store(next)
+	previous := e.snapshot.Swap(candidate)
+	installed = true
+	if previous != nil {
+		e.retire(previous)
+	}
 	e.pruneHealthState(compiled)
 	e.statusMu.Lock()
 	e.rejectedRevision = 0
@@ -387,6 +417,7 @@ func (e *Engine) Drain(ctx context.Context) error {
 	e.activeMu.Unlock()
 	select {
 	case <-drained:
+		e.snapshotCloseOnce.Do(e.closeSnapshots)
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -408,6 +439,13 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 		return contract.Response{}, err
 	}
 	cacheKey, cached, cacheHit := e.lookupCache(ctx, principal, prepared)
+	cacheFillLease := ""
+	if !cacheHit && cacheKey != "" {
+		cached, cacheHit, cacheFillLease = e.coordinateCacheFill(ctx, prepared.request, cacheKey)
+		if cacheFillLease != "" {
+			defer e.releaseCacheFill(ctx, cacheFillLease)
+		}
+	}
 	if cacheHit {
 		prepared, err = e.admitCached(ctx, principal, prepared, cached.Usage)
 	} else {
@@ -626,26 +664,15 @@ func (e *Engine) admitCached(ctx context.Context, principal contract.Principal, 
 }
 
 func (e *Engine) reserve(ctx context.Context, principal contract.Principal, prepared preparedRequest, exposure contract.Usage) (preparedRequest, error) {
-	bindings, err := policyBindings(prepared.runtime.catalog, principal, prepared.model)
-	if err != nil {
-		return preparedRequest{}, publicError(contract.ErrorInternal, "invalid effective policy", 500, false, err)
-	}
-	reservations, err := accounting.Reservations(bindings, accounting.Measures{
-		Requests: 1, InputTokens: exposure.InputTokens, OutputTokens: exposure.OutputTokens,
-		TotalTokens: exposure.TotalTokens, CostMicros: exposure.CostMicros, Concurrency: 1,
-	}, prepared.request.StartedAt)
-	if err != nil {
-		return preparedRequest{}, publicError(contract.ErrorInternal, "invalid effective policy", 500, false, err)
-	}
-	token, err := e.accounting.Admit(ctx, contract.Admission{
+	token, err := e.metering.Admit(ctx, contract.Admission{
 		RequestID: prepared.request.ID, Principal: principal, ModelID: prepared.model.ID, Operation: prepared.request.Operation,
-		StartedAt: prepared.request.StartedAt, EstimatedUsage: exposure, LimitReservations: reservations,
+		StartedAt: prepared.request.StartedAt, EstimatedUsage: exposure,
 	})
 	if err != nil {
-		if errors.Is(err, accounting.ErrLimitExceeded) {
+		if errors.Is(err, ErrAdmissionDenied) {
 			return preparedRequest{}, publicError(contract.ErrorInsufficientQuota, "insufficient quota", 402, false, err)
 		}
-		return preparedRequest{}, publicError(contract.ErrorInternal, "accounting admission failed", 500, false, err)
+		return preparedRequest{}, publicError(contract.ErrorInternal, "metering admission failed", 500, false, err)
 	}
 	prepared.token = token
 	prepared.reserved = exposure
@@ -675,21 +702,53 @@ func (e *Engine) beginRequest() bool {
 
 func (e *Engine) endRequest() {
 	e.activeMu.Lock()
-	defer e.activeMu.Unlock()
 	if e.activeRequests < 1 {
+		e.activeMu.Unlock()
 		panic("llmgateway: unbalanced request lifecycle")
 	}
 	e.activeRequests--
+	var retired []*runtimeSnapshot
 	if e.activeRequests == 0 {
 		close(e.drained)
+		retired = e.retired
+		e.retired = nil
+	}
+	e.activeMu.Unlock()
+	for _, snapshot := range retired {
+		snapshot.closeIdleConnections()
+	}
+}
+
+func (e *Engine) retire(snapshot *runtimeSnapshot) {
+	e.activeMu.Lock()
+	if e.activeRequests == 0 {
+		e.activeMu.Unlock()
+		snapshot.closeIdleConnections()
+		return
+	}
+	e.retired = append(e.retired, snapshot)
+	e.activeMu.Unlock()
+}
+
+func (e *Engine) closeSnapshots() {
+	e.activeMu.Lock()
+	retired := e.retired
+	e.retired = nil
+	current := e.snapshot.Load()
+	e.activeMu.Unlock()
+	for _, snapshot := range retired {
+		snapshot.closeIdleConnections()
+	}
+	if current != nil {
+		current.closeIdleConnections()
 	}
 }
 
 func (e *Engine) finalize(parent context.Context, completion contract.Completion) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), e.finalizationTimeout)
 	defer cancel()
-	if err := e.accounting.Finalize(ctx, completion); err != nil {
-		return publicError(contract.ErrorInternal, "accounting finalization failed", 500, false, err)
+	if err := e.metering.Complete(ctx, completion); err != nil {
+		return publicError(contract.ErrorInternal, "metering completion failed", 500, false, err)
 	}
 	return nil
 }
@@ -703,8 +762,8 @@ func (e *Engine) finalizePrepared(parent context.Context, prepared preparedReque
 func (e *Engine) cancel(parent context.Context, cancellation contract.Cancellation) error {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), e.finalizationTimeout)
 	defer cancel()
-	if err := e.accounting.Cancel(ctx, cancellation); err != nil {
-		return publicError(contract.ErrorInternal, "accounting cancellation failed", 500, false, err)
+	if err := e.metering.Cancel(ctx, cancellation); err != nil {
+		return publicError(contract.ErrorInternal, "metering cancellation failed", 500, false, err)
 	}
 	return nil
 }
@@ -716,7 +775,7 @@ func (e *Engine) cancelPrepared(parent context.Context, prepared preparedRequest
 }
 
 func (e *Engine) recordTerminal(parent context.Context, prepared preparedRequest, status string, code contract.ErrorCode, cacheStatus string,
-	usage contract.Usage, attempts []contract.Attempt, ended time.Time, accountingErr error) {
+	usage contract.Usage, attempts []contract.Attempt, ended time.Time, meteringErr error) {
 	ctx := context.WithoutCancel(parent)
 	for _, attempt := range attempts {
 		e.telemetry.Record(ctx, TelemetryEvent{Name: "attempt.completed", RequestID: prepared.request.ID,
@@ -728,16 +787,16 @@ func (e *Engine) recordTerminal(parent context.Context, prepared preparedRequest
 				"time_to_first_byte_ms": durationMillis(attempt.StartedAt, attempt.FirstByteAt), "input_tokens": attempt.Usage.InputTokens,
 				"output_tokens": attempt.Usage.OutputTokens, "cost_micros": attempt.Usage.CostMicros}})
 	}
-	accountingStatus := "ok"
-	if accountingErr != nil {
-		accountingStatus = "failed"
+	meteringStatus := "ok"
+	if meteringErr != nil {
+		meteringStatus = "failed"
 	}
 	e.telemetry.Record(ctx, TelemetryEvent{Name: "request.completed", RequestID: prepared.request.ID,
 		Revision: prepared.runtime.catalog.Revision(), Attributes: map[string]string{
 			"operation": string(prepared.request.Operation), "model": prepared.request.PublicModel, "status": status,
 			"error_code": string(code), "cache_status": cacheStatus, "key_id": string(prepared.principal.KeyID),
 			"key_prefix": prepared.principal.KeyPrefix, "owner_id": string(prepared.principal.OwnerID),
-			"team_id": string(prepared.principal.TeamID), "accounting": accountingStatus,
+			"team_id": string(prepared.principal.TeamID), "metering": meteringStatus,
 		}, Measures: map[string]int64{"attempt_count": int64(len(attempts)), "duration_ms": durationMillis(prepared.request.StartedAt, ended),
 			"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens, "total_tokens": usage.TotalTokens, "cost_micros": usage.CostMicros}})
 }
@@ -772,25 +831,6 @@ func (e *Engine) waitForRetry(ctx context.Context, failureIndex int, failure *co
 	case <-timer.C():
 		return nil
 	}
-}
-
-func policyBindings(snapshot *catalog.Snapshot, principal contract.Principal, model catalog.Model) ([]accounting.Binding, error) {
-	result := make([]accounting.Binding, 0, len(principal.PolicyBindings)+1)
-	for _, reference := range principal.PolicyBindings {
-		policy, ok := snapshot.Policy(reference.PolicyID)
-		if !ok {
-			return nil, fmt.Errorf("principal references unknown policy %q", reference.PolicyID)
-		}
-		result = append(result, accounting.Binding{ScopeKind: reference.ScopeKind, ScopeID: reference.ScopeID, Policy: policy})
-	}
-	if model.PolicyID != "" {
-		policy, ok := snapshot.Policy(model.PolicyID)
-		if !ok {
-			return nil, fmt.Errorf("model references unknown policy %q", model.PolicyID)
-		}
-		result = append(result, accounting.Binding{ScopeKind: "model", ScopeID: model.ID, Policy: policy})
-	}
-	return result, nil
 }
 
 func normalizeError(err error, fallback contract.ErrorCode, status int, retryable bool) *contract.Error {

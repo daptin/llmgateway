@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,6 +17,7 @@ import (
 
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
+	"github.com/daptin/llmgateway/internal/jsonx"
 )
 
 type Engine interface {
@@ -97,12 +100,15 @@ func (h *Handler) authenticate(request *http.Request) (contract.Principal, error
 }
 
 func readJSONBody(response http.ResponseWriter, request *http.Request, maximum int64) ([]byte, error) {
-	if encoding := request.Header.Get("Content-Encoding"); encoding != "" && encoding != "identity" {
+	if encoding := strings.TrimSpace(request.Header.Get("Content-Encoding")); encoding != "" && !strings.EqualFold(encoding, "identity") {
 		return nil, gatewayError(contract.ErrorInvalidRequest, "compressed request bodies are not supported", http.StatusUnsupportedMediaType, false, nil)
 	}
 	contentType := request.Header.Get("Content-Type")
-	if contentType != "" && !strings.HasPrefix(strings.ToLower(contentType), "application/json") {
-		return nil, gatewayError(contract.ErrorInvalidRequest, "content type must be application/json", http.StatusUnsupportedMediaType, false, nil)
+	if contentType != "" {
+		mediaType, _, err := mime.ParseMediaType(contentType)
+		if err != nil || !strings.EqualFold(mediaType, "application/json") {
+			return nil, gatewayError(contract.ErrorInvalidRequest, "content type must be application/json", http.StatusUnsupportedMediaType, false, err)
+		}
 	}
 	request.Body = http.MaxBytesReader(response, request.Body, maximum)
 	body, err := io.ReadAll(request.Body)
@@ -123,15 +129,7 @@ func readJSONBody(response http.ResponseWriter, request *http.Request, maximum i
 }
 
 func decodeStrict(data []byte, destination any) error {
-	decoder := json.NewDecoder(strings.NewReader(string(data)))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(destination); err != nil {
-		return err
-	}
-	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
-		return errors.New("request must contain one JSON document")
-	}
-	return nil
+	return jsonx.DecodeOne(bytes.NewReader(data), destination)
 }
 
 func (h *Handler) requestID(request *http.Request) (contract.ID, error) {

@@ -1,10 +1,10 @@
 # llmgateway
 
-`llmgateway` is an embeddable Go engine for authenticated, policy-controlled,
+`llmgateway` is an embeddable Go engine for authenticated, host-metered,
 multi-provider LLM inference. It owns protocol normalization, routing, retries,
-stream commit semantics, guardrails, caching decisions, and accounting state
-transitions. Hosts provide persistence, identity, secrets, distributed counters,
-and telemetry through explicit interfaces.
+stream commit semantics, guardrails, caching decisions, and provider-neutral
+usage facts. Hosts provide metering policy and persistence, identity, secrets,
+distributed counters, and telemetry through explicit interfaces.
 
 The module intentionally has no dependency on Daptin, Gin, api2go, SQL,
 database drivers, or distributed-cache clients. Daptin consumes tagged releases
@@ -14,9 +14,9 @@ The compatibility surface is declared in `compatibility/manifest.json`. An
 endpoint or provider is supported only when its manifest entry is backed by its
 conformance suite.
 
-The current manifest is a target contract, not a verified parity claim. Named
-services become certified only after their live-provider and conformance gates
-pass; the presence of a compatible URL alone is not certification.
+The current manifest is the target module contract. Declared wire fields and
+operations require conformance coverage, and named services additionally
+require their live-provider matrix before the manifest can be marked verified.
 
 Model defaults are compiled once with the catalog and use operation-scoped JSON
 so fields with similar names cannot collide:

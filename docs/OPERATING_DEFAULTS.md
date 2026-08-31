@@ -6,14 +6,12 @@ machine before v1.0.0.
 
 ## Bounds
 
-- Compressed request body: 8 MiB
-- Decompressed request body: 16 MiB
+- JSON request body: 16 MiB
+- Compressed request bodies: rejected
 - Upstream stream event: 1 MiB
 - Buffered first semantic event: 1 MiB
-- Maximum upstream attempts including the first: 3
-- Maximum fallback depth: 4 models
-- Maximum tool definitions: 128
-- Maximum bounded attempt records per logical request: 12
+- Upstream attempts including the first: 3 by default, configurable from 1 to 12
+- Fallback graphs: cycle-checked at catalog compilation; execution remains bounded by the attempt limit
 
 ## Timeouts
 
@@ -22,9 +20,10 @@ machine before v1.0.0.
 - Response headers / first byte: 30 seconds
 - Non-streaming request: 120 seconds
 - Stream idle: 60 seconds
-- Accounting terminalization: 5 seconds
+- Cache fill coalescing wait: 5 seconds
+- Metering terminalization: 5 seconds
 - Graceful drain: 30 seconds
-- Maximum cumulative retry backoff: 5 seconds and at most 20% of the request deadline
+- Retry backoff: exponential from 100 ms, capped at 2 seconds per retry and by the total request deadline
 
 ## Qualification target
 
@@ -36,8 +35,8 @@ the same network.
 - 250 non-streaming requests/second
 - Gateway-only p95 overhead below 15 ms and p99 below 40 ms
 - Steady-state memory below 96 KiB per idle/slow stream, excluding payload data
-- No more than 20 accounting connections from the process
-- Accounting terminalization p99 below 100 ms under the target mix
+- No more than 20 metering persistence connections from the process
+- Metering terminalization p99 below 100 ms under the target mix
 - Catalog convergence within 5 seconds after SQL commit
 - API-key revocation convergence within 5 seconds after SQL commit
 - Zero durable hard-budget overspend under concurrent multi-node admission
