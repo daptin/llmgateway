@@ -114,7 +114,8 @@ func (a *Adapter) Capabilities() adapter.Capabilities {
 		contract.OperationEmbeddings: true, contract.OperationImageGeneration: true,
 	}, Features: map[string]bool{
 		"audio": true, "dimensions": true, "json_schema": true, "logprobs": true,
-		"streaming": true, "token_ids": true, "tools": true, "vision": true,
+		"parallel_tools": true, "penalties": true, "reasoning": true, "streaming": true,
+		"token_ids": true, "tools": true, "vision": true,
 	}}
 }
 

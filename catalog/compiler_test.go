@@ -120,7 +120,8 @@ func TestCompileAcceptsImplementedParameterPolicies(t *testing.T) {
 
 func TestCompiledDefaultsNormalizeWithoutMutatingCaller(t *testing.T) {
 	document := validDocument()
-	document.Models[0].DefaultParameters = []byte(`{"chat":{"n":2,"temperature":0,"max_completion_tokens":32,"stop":["done"]}}`)
+	document.Models[0].Capabilities = map[string]bool{"penalties": true, "parallel_tools": true, "reasoning": true}
+	document.Models[0].DefaultParameters = []byte(`{"chat":{"n":2,"temperature":0,"frequency_penalty":0.5,"presence_penalty":-0.25,"parallel_tool_calls":false,"reasoning_effort":"low","max_completion_tokens":32,"stop":["done"]}}`)
 	snapshot, err := Compile(document)
 	if err != nil {
 		t.Fatal(err)
@@ -131,7 +132,9 @@ func TestCompiledDefaultsNormalizeWithoutMutatingCaller(t *testing.T) {
 		t.Fatal(err)
 	}
 	if request.Chat.N != 0 || normalized.Chat.N != 2 || normalized.Chat.MaxCompletionTokens != 32 ||
-		normalized.MaxOutputTokens != 32 || normalized.Chat.Temperature == nil || *normalized.Chat.Temperature != 0 || len(normalized.Chat.Stop) != 1 {
+		normalized.MaxOutputTokens != 32 || normalized.Chat.Temperature == nil || *normalized.Chat.Temperature != 0 || len(normalized.Chat.Stop) != 1 ||
+		normalized.Chat.FrequencyPenalty == nil || *normalized.Chat.FrequencyPenalty != 0.5 || normalized.Chat.PresencePenalty == nil ||
+		*normalized.Chat.PresencePenalty != -0.25 || normalized.Chat.ParallelToolCalls == nil || *normalized.Chat.ParallelToolCalls || normalized.Chat.ReasoningEffort != "low" {
 		t.Fatalf("request=%+v normalized=%+v", request, normalized)
 	}
 	explicit := contract.Request{Operation: contract.OperationChat, Chat: &contract.ChatRequest{N: 1, MaxCompletionTokens: 7}}
@@ -141,6 +144,18 @@ func TestCompiledDefaultsNormalizeWithoutMutatingCaller(t *testing.T) {
 	}
 	if normalized.Chat.N != 1 || normalized.Chat.MaxCompletionTokens != 7 || normalized.MaxOutputTokens != 7 {
 		t.Fatalf("explicit request was overwritten: %+v", normalized)
+	}
+}
+
+func TestCompileRejectsSamplingDefaultsWithoutCapabilities(t *testing.T) {
+	for _, defaults := range []string{
+		`{"chat":{"frequency_penalty":1}}`, `{"chat":{"parallel_tool_calls":false}}`, `{"chat":{"reasoning_effort":"low"}}`,
+	} {
+		document := validDocument()
+		document.Models[0].DefaultParameters = []byte(defaults)
+		if _, err := Compile(document); err == nil {
+			t.Fatalf("accepted undeclared sampling capability default %s", defaults)
+		}
 	}
 }
 

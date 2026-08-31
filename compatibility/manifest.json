@@ -24,13 +24,17 @@
         "n": "translated",
         "temperature": "translated",
         "top_p": "translated",
+        "frequency_penalty": "translated",
+        "presence_penalty": "translated",
         "max_tokens": "translated",
         "max_completion_tokens": "translated",
         "stop": "translated",
         "user": "translated",
         "seed": "translated",
         "logprobs": "translated",
-        "top_logprobs": "translated"
+        "top_logprobs": "translated",
+        "parallel_tool_calls": "translated",
+        "reasoning_effort": "translated"
       },
       "response_fields": {"id":"native","object":"native","created":"translated","model":"native","choices":"translated","usage":"translated"}
     },

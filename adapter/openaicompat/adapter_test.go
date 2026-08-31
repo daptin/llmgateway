@@ -41,7 +41,8 @@ func TestInvokeChatTranslatesCanonicalRequestAndResponse(t *testing.T) {
 		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
 			t.Fatal(err)
 		}
-		if body["model"] != "upstream-model" || body["max_completion_tokens"] != float64(20) || body["stream"] != false {
+		if body["model"] != "upstream-model" || body["max_completion_tokens"] != float64(20) || body["stream"] != false ||
+			body["frequency_penalty"] != -0.5 || body["presence_penalty"] != 1.25 || body["parallel_tool_calls"] != false || body["reasoning_effort"] != "low" {
 			t.Fatalf("unexpected body: %#v", body)
 		}
 		response.Header().Set("Content-Type", "application/json")
@@ -49,9 +50,11 @@ func TestInvokeChatTranslatesCanonicalRequestAndResponse(t *testing.T) {
 	}))
 	defer server.Close()
 	adapter := buildAdapter(t, server, `{"organization":"org"}`, Factory{})
+	frequency, presence, parallel := -0.5, 1.25, false
 	request := contract.Request{Operation: contract.OperationChat, Chat: &contract.ChatRequest{
 		Messages: []contract.Message{{Role: "user", Content: []contract.ContentPart{{Type: "text", Text: "weather"}}}}, MaxCompletionTokens: 20,
-		Tools: []contract.Tool{{Type: "function", Function: contract.FunctionDefinition{Name: "weather", Parameters: json.RawMessage(`{"type":"object"}`)}}},
+		Tools:            []contract.Tool{{Type: "function", Function: contract.FunctionDefinition{Name: "weather", Parameters: json.RawMessage(`{"type":"object"}`)}}},
+		FrequencyPenalty: &frequency, PresencePenalty: &presence, ParallelToolCalls: &parallel, ReasoningEffort: "low",
 	}}
 	result, err := adapter.Invoke(context.Background(), deployment(), request)
 	if err != nil {

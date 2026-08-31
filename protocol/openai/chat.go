@@ -23,6 +23,8 @@ type chatRequest struct {
 	N                   *int            `json:"n,omitempty"`
 	Temperature         *float64        `json:"temperature,omitempty"`
 	TopP                *float64        `json:"top_p,omitempty"`
+	FrequencyPenalty    *float64        `json:"frequency_penalty,omitempty"`
+	PresencePenalty     *float64        `json:"presence_penalty,omitempty"`
 	MaxTokens           *int64          `json:"max_tokens,omitempty"`
 	MaxCompletionTokens *int64          `json:"max_completion_tokens,omitempty"`
 	Stop                json.RawMessage `json:"stop,omitempty"`
@@ -30,6 +32,8 @@ type chatRequest struct {
 	Seed                *int64          `json:"seed,omitempty"`
 	Logprobs            bool            `json:"logprobs,omitempty"`
 	TopLogprobs         *int            `json:"top_logprobs,omitempty"`
+	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
+	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
 }
 
 type streamOptions struct {
@@ -168,7 +172,19 @@ func (h *Handler) canonicalChat(id contract.ID, wire chatRequest, requestBytes i
 	if wire.TopP != nil && (*wire.TopP < 0 || *wire.TopP > 1) {
 		return contract.Request{}, false, gatewayError(contract.ErrorInvalidRequest, "top_p must be between 0 and 1", http.StatusBadRequest, false, nil)
 	}
-	chat := &contract.ChatRequest{N: n, Temperature: wire.Temperature, TopP: wire.TopP, MaxCompletionTokens: maximum, User: wire.User, Seed: wire.Seed, Logprobs: wire.Logprobs}
+	if wire.FrequencyPenalty != nil && (*wire.FrequencyPenalty < -2 || *wire.FrequencyPenalty > 2) {
+		return contract.Request{}, false, gatewayError(contract.ErrorInvalidRequest, "frequency_penalty must be between -2 and 2", http.StatusBadRequest, false, nil)
+	}
+	if wire.PresencePenalty != nil && (*wire.PresencePenalty < -2 || *wire.PresencePenalty > 2) {
+		return contract.Request{}, false, gatewayError(contract.ErrorInvalidRequest, "presence_penalty must be between -2 and 2", http.StatusBadRequest, false, nil)
+	}
+	if wire.ReasoningEffort != "" && wire.ReasoningEffort != "none" && wire.ReasoningEffort != "minimal" && wire.ReasoningEffort != "low" &&
+		wire.ReasoningEffort != "medium" && wire.ReasoningEffort != "high" && wire.ReasoningEffort != "xhigh" {
+		return contract.Request{}, false, gatewayError(contract.ErrorInvalidRequest, "invalid reasoning_effort", http.StatusBadRequest, false, nil)
+	}
+	chat := &contract.ChatRequest{N: n, Temperature: wire.Temperature, TopP: wire.TopP, FrequencyPenalty: wire.FrequencyPenalty,
+		PresencePenalty: wire.PresencePenalty, MaxCompletionTokens: maximum, User: wire.User, Seed: wire.Seed, Logprobs: wire.Logprobs,
+		ParallelToolCalls: wire.ParallelToolCalls, ReasoningEffort: wire.ReasoningEffort}
 	if wire.TopLogprobs != nil {
 		if *wire.TopLogprobs < 0 || *wire.TopLogprobs > 20 || !wire.Logprobs {
 			return contract.Request{}, false, gatewayError(contract.ErrorInvalidRequest, "top_logprobs requires logprobs and must be between 0 and 20", http.StatusBadRequest, false, nil)

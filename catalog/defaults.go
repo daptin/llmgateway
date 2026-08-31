@@ -21,9 +21,13 @@ type chatDefaults struct {
 	N                   *int     `json:"n,omitempty"`
 	Temperature         *float64 `json:"temperature,omitempty"`
 	TopP                *float64 `json:"top_p,omitempty"`
+	FrequencyPenalty    *float64 `json:"frequency_penalty,omitempty"`
+	PresencePenalty     *float64 `json:"presence_penalty,omitempty"`
 	MaxCompletionTokens *int64   `json:"max_completion_tokens,omitempty"`
 	Stop                []string `json:"stop,omitempty"`
 	Seed                *int64   `json:"seed,omitempty"`
+	ParallelToolCalls   *bool    `json:"parallel_tool_calls,omitempty"`
+	ReasoningEffort     *string  `json:"reasoning_effort,omitempty"`
 }
 
 type responsesDefaults struct {
@@ -70,6 +74,15 @@ func parseModelDefaults(model Model) (modelDefaults, error) {
 	if defaults.Embeddings.Dimensions != nil && !model.Capabilities["dimensions"] {
 		return modelDefaults{}, fmt.Errorf("model %q embedding dimensions default requires the dimensions capability", model.ID)
 	}
+	for capability, configured := range map[string]bool{
+		"penalties":      defaults.Chat.FrequencyPenalty != nil || defaults.Chat.PresencePenalty != nil,
+		"parallel_tools": defaults.Chat.ParallelToolCalls != nil,
+		"reasoning":      defaults.Chat.ReasoningEffort != nil,
+	} {
+		if configured && !model.Capabilities[capability] {
+			return modelDefaults{}, fmt.Errorf("model %q chat defaults require the %s capability", model.ID, capability)
+		}
+	}
 	return defaults, nil
 }
 
@@ -82,6 +95,14 @@ func (d modelDefaults) validate() error {
 	}
 	if d.Chat.TopP != nil && (*d.Chat.TopP < 0 || *d.Chat.TopP > 1) {
 		return errors.New("chat top_p default must be between 0 and 1")
+	}
+	if (d.Chat.FrequencyPenalty != nil && (*d.Chat.FrequencyPenalty < -2 || *d.Chat.FrequencyPenalty > 2)) ||
+		(d.Chat.PresencePenalty != nil && (*d.Chat.PresencePenalty < -2 || *d.Chat.PresencePenalty > 2)) {
+		return errors.New("chat penalty defaults must be between -2 and 2")
+	}
+	if d.Chat.ReasoningEffort != nil && *d.Chat.ReasoningEffort != "none" && *d.Chat.ReasoningEffort != "minimal" &&
+		*d.Chat.ReasoningEffort != "low" && *d.Chat.ReasoningEffort != "medium" && *d.Chat.ReasoningEffort != "high" && *d.Chat.ReasoningEffort != "xhigh" {
+		return errors.New("chat reasoning_effort default is invalid")
 	}
 	if d.Chat.Stop != nil && (len(d.Chat.Stop) == 0 || len(d.Chat.Stop) > 4) {
 		return errors.New("chat stop default supports at most four values")
@@ -110,7 +131,8 @@ func (d modelDefaults) validate() error {
 }
 
 func (d chatDefaults) present() bool {
-	return d.N != nil || d.Temperature != nil || d.TopP != nil || d.MaxCompletionTokens != nil || d.Stop != nil || d.Seed != nil
+	return d.N != nil || d.Temperature != nil || d.TopP != nil || d.FrequencyPenalty != nil || d.PresencePenalty != nil ||
+		d.MaxCompletionTokens != nil || d.Stop != nil || d.Seed != nil || d.ParallelToolCalls != nil || d.ReasoningEffort != nil
 }
 func (d responsesDefaults) present() bool  { return d.MaxOutputTokens != nil }
 func (d embeddingsDefaults) present() bool { return d.Dimensions != nil || d.EncodingFormat != nil }
@@ -157,6 +179,12 @@ func (s *Snapshot) ApplyDefaults(modelID contract.ID, request contract.Request, 
 		if request.Chat.TopP == nil {
 			request.Chat.TopP = cloneFloat(defaults.Chat.TopP)
 		}
+		if request.Chat.FrequencyPenalty == nil {
+			request.Chat.FrequencyPenalty = cloneFloat(defaults.Chat.FrequencyPenalty)
+		}
+		if request.Chat.PresencePenalty == nil {
+			request.Chat.PresencePenalty = cloneFloat(defaults.Chat.PresencePenalty)
+		}
 		if request.Chat.MaxCompletionTokens == 0 {
 			if defaults.Chat.MaxCompletionTokens != nil {
 				request.Chat.MaxCompletionTokens = *defaults.Chat.MaxCompletionTokens
@@ -170,6 +198,13 @@ func (s *Snapshot) ApplyDefaults(modelID contract.ID, request contract.Request, 
 		if request.Chat.Seed == nil && defaults.Chat.Seed != nil {
 			seed := *defaults.Chat.Seed
 			request.Chat.Seed = &seed
+		}
+		if request.Chat.ParallelToolCalls == nil && defaults.Chat.ParallelToolCalls != nil {
+			value := *defaults.Chat.ParallelToolCalls
+			request.Chat.ParallelToolCalls = &value
+		}
+		if request.Chat.ReasoningEffort == "" && defaults.Chat.ReasoningEffort != nil {
+			request.Chat.ReasoningEffort = *defaults.Chat.ReasoningEffort
 		}
 		request.MaxOutputTokens = request.Chat.MaxCompletionTokens
 	case contract.OperationResponses:

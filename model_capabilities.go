@@ -106,6 +106,15 @@ func requiredAdapterFeatures(request contract.Request) []string {
 		if request.Chat.Logprobs {
 			add("logprobs")
 		}
+		if request.Chat.FrequencyPenalty != nil || request.Chat.PresencePenalty != nil {
+			add("penalties")
+		}
+		if request.Chat.ParallelToolCalls != nil {
+			add("parallel_tools")
+		}
+		if request.Chat.ReasoningEffort != "" {
+			add("reasoning")
+		}
 	case contract.OperationResponses:
 		if len(request.Responses.Tools) != 0 || request.Responses.ToolChoice != nil || responsesUseTools(request.Responses.Input) {
 			add("tools")

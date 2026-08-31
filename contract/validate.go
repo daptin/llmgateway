@@ -46,6 +46,14 @@ func (r Request) Validate() error {
 		if r.Chat.N < 1 || r.Chat.MaxCompletionTokens < 1 {
 			return errors.New("chat n and maximum completion tokens must be positive")
 		}
+		if !validOptionalRange(r.Chat.Temperature, 0, 2) || !validOptionalRange(r.Chat.TopP, 0, 1) ||
+			!validOptionalRange(r.Chat.FrequencyPenalty, -2, 2) || !validOptionalRange(r.Chat.PresencePenalty, -2, 2) {
+			return errors.New("chat sampling parameters are out of range")
+		}
+		if r.Chat.ReasoningEffort != "" && r.Chat.ReasoningEffort != "none" && r.Chat.ReasoningEffort != "minimal" &&
+			r.Chat.ReasoningEffort != "low" && r.Chat.ReasoningEffort != "medium" && r.Chat.ReasoningEffort != "high" && r.Chat.ReasoningEffort != "xhigh" {
+			return errors.New("invalid chat reasoning effort")
+		}
 	case OperationResponses:
 		if r.Responses == nil || len(r.Responses.Input) == 0 {
 			return errors.New("responses request requires input")
@@ -95,6 +103,10 @@ func (r Request) Validate() error {
 		}
 	}
 	return nil
+}
+
+func validOptionalRange(value *float64, minimum, maximum float64) bool {
+	return value == nil || (*value >= minimum && *value <= maximum)
 }
 
 func validateMessages(messages []Message) error {

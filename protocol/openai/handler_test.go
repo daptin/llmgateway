@@ -185,7 +185,7 @@ func TestChatCanonicalizesTypedMultimodalToolsAndReturnsGoldenResponse(t *testin
 		Usage: contract.Usage{InputTokens: 9, OutputTokens: 4, TotalTokens: 13},
 	}}
 	handler := testHandler(t, engine, fakeAuthenticator{principal: contract.Principal{KeyID: "key-1"}})
-	body := `{"model":"allowed","messages":[{"role":"user","content":[{"type":"text","text":"weather"},{"type":"image_url","image_url":{"url":"https://example.test/map.png","detail":"low"}}]}],"tools":[{"type":"function","function":{"name":"weather","parameters":{"type":"object"},"strict":true}}],"tool_choice":{"type":"function","function":{"name":"weather"}},"max_completion_tokens":32}`
+	body := `{"model":"allowed","messages":[{"role":"user","content":[{"type":"text","text":"weather"},{"type":"image_url","image_url":{"url":"https://example.test/map.png","detail":"low"}}]}],"tools":[{"type":"function","function":{"name":"weather","parameters":{"type":"object"},"strict":true}}],"tool_choice":{"type":"function","function":{"name":"weather"}},"frequency_penalty":-0.5,"presence_penalty":1.25,"parallel_tool_calls":false,"reasoning_effort":"low","max_completion_tokens":32}`
 	response := perform(handler, http.MethodPost, "/v1/chat/completions", body, "key")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -196,6 +196,10 @@ func TestChatCanonicalizesTypedMultimodalToolsAndReturnsGoldenResponse(t *testin
 	}
 	if len(request.Chat.Messages[0].Content) != 2 || request.Chat.ToolChoice.FunctionName != "weather" || !*request.Chat.Tools[0].Function.Strict {
 		t.Fatalf("typed fields were not preserved: %#v", request.Chat)
+	}
+	if request.Chat.FrequencyPenalty == nil || *request.Chat.FrequencyPenalty != -0.5 || request.Chat.PresencePenalty == nil ||
+		*request.Chat.PresencePenalty != 1.25 || request.Chat.ParallelToolCalls == nil || *request.Chat.ParallelToolCalls || request.Chat.ReasoningEffort != "low" {
+		t.Fatalf("sampling controls were not preserved: %#v", request.Chat)
 	}
 	want := `{"choices":[{"finish_reason":"tool_calls","index":0,"message":{"content":null,"role":"assistant","tool_calls":[{"function":{"arguments":"{\"city\":\"Pune\"}","name":"weather"},"id":"call_1","type":"function"}]}}],"created":123,"id":"chatcmpl_1","model":"allowed","object":"chat.completion","usage":{"completion_tokens":4,"prompt_tokens":9,"total_tokens":13}}`
 	var gotObject, wantObject any
@@ -209,6 +213,20 @@ func TestChatCanonicalizesTypedMultimodalToolsAndReturnsGoldenResponse(t *testin
 	expected, _ := json.Marshal(wantObject)
 	if string(got) != string(expected) {
 		t.Fatalf("response mismatch\n got: %s\nwant: %s", got, expected)
+	}
+}
+
+func TestChatRejectsInvalidSamplingControls(t *testing.T) {
+	handler := testHandler(t, &fakeEngine{snapshot: testSnapshot(t)}, fakeAuthenticator{})
+	for _, body := range []string{
+		`{"model":"allowed","messages":[{"role":"user","content":"hello"}],"frequency_penalty":2.1}`,
+		`{"model":"allowed","messages":[{"role":"user","content":"hello"}],"presence_penalty":-2.1}`,
+		`{"model":"allowed","messages":[{"role":"user","content":"hello"}],"reasoning_effort":"maximum"}`,
+	} {
+		response := perform(handler, http.MethodPost, "/v1/chat/completions", body, "key")
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("accepted invalid controls: status=%d body=%s", response.Code, response.Body.String())
+		}
 	}
 }
 

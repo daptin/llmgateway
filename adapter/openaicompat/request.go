@@ -57,6 +57,12 @@ func encodeChatRequest(model string, request contract.Request) map[string]any {
 	if chat.TopP != nil {
 		value["top_p"] = *chat.TopP
 	}
+	if chat.FrequencyPenalty != nil {
+		value["frequency_penalty"] = *chat.FrequencyPenalty
+	}
+	if chat.PresencePenalty != nil {
+		value["presence_penalty"] = *chat.PresencePenalty
+	}
 	if chat.MaxCompletionTokens > 0 {
 		value["max_completion_tokens"] = chat.MaxCompletionTokens
 	}
@@ -72,6 +78,12 @@ func encodeChatRequest(model string, request contract.Request) map[string]any {
 	if chat.Logprobs {
 		value["logprobs"] = true
 		value["top_logprobs"] = chat.TopLogprobs
+	}
+	if chat.ParallelToolCalls != nil {
+		value["parallel_tool_calls"] = *chat.ParallelToolCalls
+	}
+	if chat.ReasoningEffort != "" {
+		value["reasoning_effort"] = chat.ReasoningEffort
 	}
 	return value
 }

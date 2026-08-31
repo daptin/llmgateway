@@ -302,7 +302,7 @@ func validateModel(model Model) error {
 func validateModelCapabilities(model Model) error {
 	allowed := map[string]struct{}{
 		"audio": {}, "dimensions": {}, "exact_cache": {}, "json_schema": {}, "logprobs": {},
-		"public_cache": {}, "token_ids": {}, "tools": {}, "vision": {},
+		"parallel_tools": {}, "penalties": {}, "public_cache": {}, "reasoning": {}, "token_ids": {}, "tools": {}, "vision": {},
 	}
 	for capability := range model.Capabilities {
 		if _, ok := allowed[capability]; !ok {

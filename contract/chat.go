@@ -10,12 +10,16 @@ type ChatRequest struct {
 	N                   int
 	Temperature         *float64
 	TopP                *float64
+	FrequencyPenalty    *float64
+	PresencePenalty     *float64
 	MaxCompletionTokens int64
 	Stop                []string
 	User                string
 	Seed                *int64
 	Logprobs            bool
 	TopLogprobs         int
+	ParallelToolCalls   *bool
+	ReasoningEffort     string
 }
 
 type Message struct {
