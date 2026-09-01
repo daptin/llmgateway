@@ -271,14 +271,17 @@ func (a *Adapter) setHeaders(request *http.Request, accept string) {
 
 type cancelReadCloser struct {
 	io.ReadCloser
-	cancel context.CancelFunc
-	once   sync.Once
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (c *cancelReadCloser) Close() error {
-	err := c.ReadCloser.Close()
-	c.once.Do(c.cancel)
-	return err
+	c.closeOnce.Do(func() {
+		c.closeErr = c.ReadCloser.Close()
+		c.cancel()
+	})
+	return c.closeErr
 }
 
 func (a *Adapter) clientFor(connectTimeout time.Duration) *http.Client {

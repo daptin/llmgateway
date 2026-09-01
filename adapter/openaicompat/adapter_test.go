@@ -11,6 +11,7 @@ import (
 	"reflect"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -61,6 +62,43 @@ func TestManifestOperationsMatchOpenAICompatibleAdapter(t *testing.T) {
 
 func deployment() catalog.Deployment {
 	return catalog.Deployment{ID: "d", Name: "deployment", UpstreamModel: "upstream-model", RequestTimeout: time.Second, ConnectTimeout: time.Second}
+}
+
+type countedResponseBody struct {
+	closes atomic.Int64
+	err    error
+}
+
+func (*countedResponseBody) Read([]byte) (int, error) { return 0, io.EOF }
+func (body *countedResponseBody) Close() error {
+	body.closes.Add(1)
+	return body.err
+}
+
+func TestCancelReadCloserClosesAndCancelsExactlyOnce(t *testing.T) {
+	expected := errors.New("close failed")
+	body := &countedResponseBody{err: expected}
+	var cancellations atomic.Int64
+	wrapped := &cancelReadCloser{ReadCloser: body, cancel: func() { cancellations.Add(1) }}
+	results := make(chan error, 16)
+	var callers sync.WaitGroup
+	for range 16 {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			results <- wrapped.Close()
+		}()
+	}
+	callers.Wait()
+	close(results)
+	for err := range results {
+		if !errors.Is(err, expected) {
+			t.Fatalf("close error=%v want=%v", err, expected)
+		}
+	}
+	if body.closes.Load() != 1 || cancellations.Load() != 1 {
+		t.Fatalf("underlying closes=%d cancellations=%d, want 1/1", body.closes.Load(), cancellations.Load())
+	}
 }
 
 func TestInvokeChatTranslatesCanonicalRequestAndResponse(t *testing.T) {
