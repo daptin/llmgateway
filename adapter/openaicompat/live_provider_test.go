@@ -59,6 +59,7 @@ func TestLiveProviderMatrix(t *testing.T) {
 				t.Fatal(err)
 			}
 			upstream := built.(*Adapter)
+			defer upstream.CloseIdleConnections()
 			for _, testCase := range provider.Cases {
 				testCase := testCase
 				t.Run(testCase.Name+"/"+testCase.Model, func(t *testing.T) {
@@ -79,6 +80,42 @@ func TestLiveProviderMatrix(t *testing.T) {
 						provider.Name, provider.APIVersion, testCase.Model, testCase.Feature, result.UsageAvailable)
 				})
 			}
+			t.Run("invalid-credential", func(t *testing.T) {
+				chatModel := ""
+				for _, testCase := range provider.Cases {
+					if strings.HasPrefix(testCase.Feature, "chat") {
+						chatModel = testCase.Model
+						break
+					}
+				}
+				if chatModel == "" {
+					t.Fatal("live provider has no chat model for credential rejection certification")
+				}
+				const invalidCredential = "llmgateway-intentionally-invalid"
+				invalidBuilt, err := (Factory{}).Build(context.Background(), catalog.Provider{
+					ID: contract.ID(provider.Name + "-invalid"), Name: provider.Name, Type: provider.Name,
+					SecretRef: "invalid-live-credential", Parameters: provider.ProviderParameters, Enabled: true,
+				}, baseadapter.NewSecret([]byte(invalidCredential)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				invalidUpstream := invalidBuilt.(*Adapter)
+				defer invalidUpstream.CloseIdleConnections()
+				_, invokeErr := invalidUpstream.Invoke(ctx,
+					catalog.Deployment{ID: "invalid-live", Name: "invalid-live", UpstreamModel: chatModel, RequestTimeout: 20 * time.Second, ConnectTimeout: 10 * time.Second},
+					liveChatRequest(chatModel, "chat"),
+				)
+				var public *contract.Error
+				if invokeErr == nil || !errors.As(invokeErr, &public) || public.Retryable ||
+					(public.Code != contract.ErrorAuthentication && public.Code != contract.ErrorPermission && public.Code != contract.ErrorInvalidRequest) ||
+					strings.Contains(invokeErr.Error(), invalidCredential) {
+					t.Fatalf("provider credential rejection was not safely normalized: %v", invokeErr)
+				}
+				t.Logf("certification provider=%s api_version=%s model=%s feature=invalid_credential normalized_result=%s usage_available=false skip_reason=none",
+					provider.Name, provider.APIVersion, chatModel, public.Code)
+			})
 		})
 	}
 }
