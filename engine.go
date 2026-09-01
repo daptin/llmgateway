@@ -510,10 +510,10 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 		return usage
 	}
 	settleRetryInterruption := func(interruption error) error {
-		if errors.Is(interruption, context.Canceled) {
+		normalized := normalizeError(interruption, contract.ErrorTimeout, 504, false)
+		if normalized.HTTPStatus == 499 {
 			return cancelAdmission(contract.Cancellation{Token: prepared.token, Reason: "request_cancelled", Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()})
 		}
-		normalized := normalizeError(interruption, contract.ErrorTimeout, 504, false)
 		return finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()})
 	}
 	attemptNumber := 0
@@ -521,7 +521,7 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 		lease, gateErr := e.beforeAttempt(ctx, routeAttempt.Deployment, prepared.request)
 		if gateErr != nil {
 			normalized := normalizeError(gateErr, contract.ErrorUnavailable, 503, true)
-			if errors.Is(gateErr, context.Canceled) {
+			if normalized.HTTPStatus == 499 {
 				if cancelErr := cancelAdmission(contract.Cancellation{Token: prepared.token, Reason: "request_cancelled", Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); cancelErr != nil {
 					return contract.Response{}, cancelErr
 				}

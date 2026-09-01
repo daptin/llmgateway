@@ -146,6 +146,22 @@ func TestStreamCancellationBeforeFirstEventCancelsAccounting(t *testing.T) {
 	}
 }
 
+func TestNormalizedStreamCancellationCancelsAccounting(t *testing.T) {
+	provider := testkit.NewFaultAdapter(streamCapabilities(), testkit.AdapterStep{
+		TerminalError: &contract.Error{Code: contract.ErrorProvider, Message: "cancelled", HTTPStatus: 499},
+	})
+	store := testkit.NewMeteringRecorder()
+	_, err := streamEngine(t, testDocument(), provider, store).Stream(
+		context.Background(), contract.Principal{}, chatRequest("normalized-cancelled", true))
+	var gatewayError *contract.Error
+	if !errors.As(err, &gatewayError) || gatewayError.HTTPStatus != 499 {
+		t.Fatalf("normalized cancellation error=%v", err)
+	}
+	if store.State("normalized-cancelled") != "cancelled" {
+		t.Fatalf("normalized cancellation state=%s", store.State("normalized-cancelled"))
+	}
+}
+
 func TestLogicalRequestDeadlineCoversStreamSetup(t *testing.T) {
 	store := testkit.NewMeteringRecorder()
 	_, err := streamEngine(t, testDocument(), waitingAdapter{}, store, llmgateway.Options{
