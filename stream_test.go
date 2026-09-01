@@ -39,7 +39,10 @@ func streamEngine(t *testing.T, document catalog.Document, provider adapter.Adap
 	return engine
 }
 
-type waitingAdapter struct{ first bool }
+type waitingAdapter struct {
+	first   bool
+	entered chan<- struct{}
+}
 
 func (waitingAdapter) Capabilities() adapter.Capabilities {
 	return streamCapabilities()
@@ -52,15 +55,21 @@ func (waitingAdapter) Invoke(context.Context, catalog.Deployment, contract.Reque
 	return contract.Response{}, errors.New("not implemented")
 }
 func (a waitingAdapter) Stream(context.Context, catalog.Deployment, contract.Request) (adapter.Stream, error) {
-	return &waitingStream{first: a.first}, nil
+	return &waitingStream{first: a.first, entered: a.entered}, nil
 }
 
-type waitingStream struct{ first bool }
+type waitingStream struct {
+	first   bool
+	entered chan<- struct{}
+}
 
 func (s *waitingStream) Next(ctx context.Context) (contract.StreamEvent, error) {
 	if s.first {
 		s.first = false
 		return contract.StreamEvent{Type: "content_delta", Chat: &contract.ChatDelta{Content: "first"}}, nil
+	}
+	if s.entered != nil {
+		s.entered <- struct{}{}
 	}
 	<-ctx.Done()
 	return contract.StreamEvent{}, ctx.Err()
@@ -112,6 +121,28 @@ func TestStreamFirstEventTimeoutFinalizesWithoutCommit(t *testing.T) {
 	}
 	if store.State("first-timeout") != "finalized" {
 		t.Fatalf("state=%s", store.State("first-timeout"))
+	}
+}
+
+func TestStreamCancellationBeforeFirstEventCancelsAccounting(t *testing.T) {
+	entered := make(chan struct{})
+	store := testkit.NewMeteringRecorder()
+	engine := streamEngine(t, testDocument(), waitingAdapter{entered: entered}, store)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := engine.Stream(ctx, contract.Principal{}, chatRequest("setup-cancelled", true))
+		result <- err
+	}()
+	<-entered
+	cancel()
+	err := <-result
+	var gatewayError *contract.Error
+	if !errors.As(err, &gatewayError) || gatewayError.HTTPStatus != 499 {
+		t.Fatalf("setup cancellation error=%v", err)
+	}
+	if store.State("setup-cancelled") != "cancelled" {
+		t.Fatalf("setup cancellation state=%s", store.State("setup-cancelled"))
 	}
 }
 
@@ -190,6 +221,32 @@ func TestStreamCloseCancelsAccounting(t *testing.T) {
 	}
 	if store.State("request") != "cancelled" {
 		t.Fatalf("state=%s", store.State("request"))
+	}
+}
+
+func TestStreamContextCancellationCancelsAccounting(t *testing.T) {
+	fault := testkit.NewFaultAdapter(
+		streamCapabilities(),
+		testkit.AdapterStep{
+			Events:        []contract.StreamEvent{{Type: "content_delta", Chat: &contract.ChatDelta{Content: "partial"}}},
+			TerminalError: context.Canceled,
+		},
+	)
+	store := testkit.NewMeteringRecorder()
+	stream, err := streamEngine(t, testDocument(), fault, store).Stream(context.Background(), contract.Principal{}, chatRequest("disconnect", true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, err = stream.Next(context.Background())
+	var gatewayError *contract.Error
+	if !errors.As(err, &gatewayError) || gatewayError.HTTPStatus != 499 {
+		t.Fatalf("disconnect error=%v", err)
+	}
+	if store.State("disconnect") != "cancelled" {
+		t.Fatalf("disconnect state=%s", store.State("disconnect"))
 	}
 }
 

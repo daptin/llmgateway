@@ -69,6 +69,13 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 		transferred = true
 		return nil
 	}
+	cancelAdmission := func(cancellation contract.Cancellation) error {
+		if cancelErr := e.cancelPrepared(ctx, prepared, cancellation); cancelErr != nil {
+			return cancelErr
+		}
+		transferred = true
+		return nil
+	}
 	attempts := make([]contract.Attempt, 0, len(prepared.plan.Attempts))
 	attemptTotal := func() contract.Usage {
 		usage, aggregateErr := aggregateAttemptUsage(attempts)
@@ -76,6 +83,13 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 			return prepared.reserved
 		}
 		return usage
+	}
+	settleRetryInterruption := func(interruption error) error {
+		if errors.Is(interruption, context.Canceled) {
+			return cancelAdmission(contract.Cancellation{Token: prepared.token, Reason: "request_cancelled", Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()})
+		}
+		normalized := normalizeError(interruption, contract.ErrorTimeout, 504, false)
+		return finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()})
 	}
 	failedUsage := func(index int, route routing.Attempt, reported *contract.Usage) contract.Usage {
 		if reported == nil {
@@ -92,6 +106,12 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 		lease, gateErr := e.beforeAttempt(ctx, routeAttempt.Deployment, prepared.request)
 		if gateErr != nil {
 			normalized := normalizeError(gateErr, contract.ErrorUnavailable, 503, true)
+			if errors.Is(gateErr, context.Canceled) {
+				if cancelErr := cancelAdmission(contract.Cancellation{Token: prepared.token, Reason: "request_cancelled", Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); cancelErr != nil {
+					return nil, cancelErr
+				}
+				return nil, normalized
+			}
 			if !normalized.Retryable || index == len(prepared.plan.Attempts)-1 {
 				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
 					return nil, finishErr
@@ -99,8 +119,8 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 				return nil, normalized
 			}
 			if waitErr := e.waitForRetry(ctx, index, normalized); waitErr != nil {
-				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "cancelled", HTTPStatus: 499, ErrorCode: contract.ErrorProvider, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
-					return nil, finishErr
+				if settleErr := settleRetryInterruption(waitErr); settleErr != nil {
+					return nil, settleErr
 				}
 				return nil, waitErr
 			}
@@ -110,7 +130,17 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 		attemptNumber++
 		upstream, normalized := e.openProviderStream(ctx, prepared.runtime.adapters[routeAttempt.Provider.ID], routeAttempt.Deployment, prepared.request, lease)
 		if normalized != nil {
-			attempts = append(attempts, failedStreamAttempt(attemptNumber, routeAttempt, started, e.clock.Now(), normalized, false, failedUsage(index, routeAttempt, nil)))
+			outcome := "failed"
+			if normalized.HTTPStatus == 499 {
+				outcome = "cancelled"
+			}
+			attempts = append(attempts, terminalStreamAttempt(attemptNumber, routeAttempt, started, e.clock.Now(), normalized, outcome, false, failedUsage(index, routeAttempt, nil)))
+			if normalized.HTTPStatus == 499 {
+				if cancelErr := cancelAdmission(contract.Cancellation{Token: prepared.token, Reason: "request_cancelled", Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); cancelErr != nil {
+					return nil, cancelErr
+				}
+				return nil, normalized
+			}
 			if !normalized.Retryable || index == len(prepared.plan.Attempts)-1 {
 				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
 					return nil, finishErr
@@ -118,8 +148,8 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 				return nil, normalized
 			}
 			if waitErr := e.waitForRetry(ctx, index, normalized); waitErr != nil {
-				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "cancelled", HTTPStatus: 499, ErrorCode: contract.ErrorProvider, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
-					return nil, finishErr
+				if settleErr := settleRetryInterruption(waitErr); settleErr != nil {
+					return nil, settleErr
 				}
 				return nil, waitErr
 			}
@@ -130,7 +160,17 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 			_ = closeProviderStream(upstream)
 			normalized := normalizeError(firstErr, contract.ErrorProvider, 502, false)
 			e.afterAttempt(ctx, routeAttempt.Deployment, lease, normalized)
-			attempts = append(attempts, failedStreamAttempt(attemptNumber, routeAttempt, started, e.clock.Now(), normalized, false, failedUsage(index, routeAttempt, preambleUsage)))
+			outcome := "failed"
+			if errors.Is(firstErr, context.Canceled) {
+				outcome = "cancelled"
+			}
+			attempts = append(attempts, terminalStreamAttempt(attemptNumber, routeAttempt, started, e.clock.Now(), normalized, outcome, false, failedUsage(index, routeAttempt, preambleUsage)))
+			if errors.Is(firstErr, context.Canceled) {
+				if cancelErr := cancelAdmission(contract.Cancellation{Token: prepared.token, Reason: "request_cancelled", Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); cancelErr != nil {
+					return nil, cancelErr
+				}
+				return nil, normalized
+			}
 			if !normalized.Retryable || index == len(prepared.plan.Attempts)-1 {
 				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
 					return nil, finishErr
@@ -138,8 +178,8 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 				return nil, normalized
 			}
 			if waitErr := e.waitForRetry(ctx, index, normalized); waitErr != nil {
-				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "cancelled", HTTPStatus: 499, ErrorCode: contract.ErrorProvider, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
-					return nil, finishErr
+				if settleErr := settleRetryInterruption(waitErr); settleErr != nil {
+					return nil, settleErr
 				}
 				return nil, waitErr
 			}
@@ -200,6 +240,12 @@ func (s *GatewayStream) Next(ctx context.Context) (contract.StreamEvent, error) 
 			return contract.StreamEvent{}, io.EOF
 		}
 		normalized := normalizeError(err, contract.ErrorProvider, 502, false)
+		if errors.Is(err, context.Canceled) {
+			if cancelErr := s.cancelLocked(ctx, "request_cancelled"); cancelErr != nil {
+				return contract.StreamEvent{}, cancelErr
+			}
+			return contract.StreamEvent{}, normalized
+		}
 		if finishErr := s.finishLocked(ctx, "failed", normalized.HTTPStatus, normalized.Code, normalized.Retryable); finishErr != nil {
 			return contract.StreamEvent{}, finishErr
 		}
@@ -231,6 +277,10 @@ func (s *GatewayStream) observeUsage(usage *contract.Usage) {
 func (s *GatewayStream) Close(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.cancelLocked(ctx, "stream_closed")
+}
+
+func (s *GatewayStream) cancelLocked(ctx context.Context, reason string) error {
 	if s.terminal {
 		s.releaseRequest()
 		return nil
@@ -253,7 +303,7 @@ func (s *GatewayStream) Close(ctx context.Context) error {
 	if aggregateErr != nil {
 		total = s.prepared.reserved
 	}
-	err := s.engine.cancelPrepared(ctx, s.prepared, contract.Cancellation{Token: s.prepared.token, Reason: "stream_closed", Usage: total, Attempts: s.attempts, EndedAt: ended})
+	err := s.engine.cancelPrepared(ctx, s.prepared, contract.Cancellation{Token: s.prepared.token, Reason: reason, Usage: total, Attempts: s.attempts, EndedAt: ended})
 	s.terminal = true
 	if err != nil {
 		return err
@@ -320,10 +370,10 @@ func (s *GatewayStream) releaseRequest() {
 	})
 }
 
-func failedStreamAttempt(number int, route routing.Attempt, started, ended time.Time, err *contract.Error, committed bool, usage contract.Usage) contract.Attempt {
+func terminalStreamAttempt(number int, route routing.Attempt, started, ended time.Time, err *contract.Error, outcome string, committed bool, usage contract.Usage) contract.Attempt {
 	return contract.Attempt{
 		Number: number, ProviderID: route.Provider.ID, DeploymentID: route.Deployment.ID,
-		StartedAt: started, EndedAt: ended, Outcome: "failed", ErrorCode: err.Code,
+		StartedAt: started, EndedAt: ended, Outcome: outcome, ErrorCode: err.Code,
 		HTTPStatus: err.HTTPStatus, Retryable: err.Retryable, OutputCommitted: committed, Usage: usage,
 	}
 }

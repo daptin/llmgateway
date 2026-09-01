@@ -478,6 +478,13 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 		settled = true
 		return nil
 	}
+	cancelAdmission := func(cancellation contract.Cancellation) error {
+		if cancelErr := e.cancelPrepared(ctx, prepared, cancellation); cancelErr != nil {
+			return cancelErr
+		}
+		settled = true
+		return nil
+	}
 	if cacheHit {
 		cached.RequestID = prepared.request.ID
 		cached.Model = prepared.request.PublicModel
@@ -502,11 +509,24 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 		}
 		return usage
 	}
+	settleRetryInterruption := func(interruption error) error {
+		if errors.Is(interruption, context.Canceled) {
+			return cancelAdmission(contract.Cancellation{Token: prepared.token, Reason: "request_cancelled", Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()})
+		}
+		normalized := normalizeError(interruption, contract.ErrorTimeout, 504, false)
+		return finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()})
+	}
 	attemptNumber := 0
 	for index, routeAttempt := range prepared.plan.Attempts {
 		lease, gateErr := e.beforeAttempt(ctx, routeAttempt.Deployment, prepared.request)
 		if gateErr != nil {
 			normalized := normalizeError(gateErr, contract.ErrorUnavailable, 503, true)
+			if errors.Is(gateErr, context.Canceled) {
+				if cancelErr := cancelAdmission(contract.Cancellation{Token: prepared.token, Reason: "request_cancelled", Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); cancelErr != nil {
+					return contract.Response{}, cancelErr
+				}
+				return contract.Response{}, normalized
+			}
 			if !normalized.Retryable || index == len(prepared.plan.Attempts)-1 {
 				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
 					return contract.Response{}, finishErr
@@ -514,6 +534,9 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 				return contract.Response{}, normalized
 			}
 			if waitErr := e.waitForRetry(ctx, index, normalized); waitErr != nil {
+				if settleErr := settleRetryInterruption(waitErr); settleErr != nil {
+					return contract.Response{}, settleErr
+				}
 				return contract.Response{}, waitErr
 			}
 			continue
@@ -523,11 +546,21 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 		response, normalized := e.invokeProvider(ctx, prepared.runtime.adapters[routeAttempt.Provider.ID], routeAttempt.Deployment, prepared.request, lease)
 		ended := e.clock.Now()
 		if normalized != nil {
+			outcome := "failed"
+			if normalized.HTTPStatus == 499 {
+				outcome = "cancelled"
+			}
 			attempts = append(attempts, contract.Attempt{
 				Number: attemptNumber, ProviderID: routeAttempt.Provider.ID, DeploymentID: routeAttempt.Deployment.ID,
-				StartedAt: started, EndedAt: ended, Outcome: "failed", ErrorCode: normalized.Code,
+				StartedAt: started, EndedAt: ended, Outcome: outcome, ErrorCode: normalized.Code,
 				HTTPStatus: normalized.HTTPStatus, Retryable: normalized.Retryable, Usage: prepared.attemptExposure[index],
 			})
+			if normalized.HTTPStatus == 499 {
+				if cancelErr := cancelAdmission(contract.Cancellation{Token: prepared.token, Reason: "request_cancelled", Usage: attemptTotal(), Attempts: attempts, EndedAt: ended}); cancelErr != nil {
+					return contract.Response{}, cancelErr
+				}
+				return contract.Response{}, normalized
+			}
 			if !normalized.Retryable || index == len(prepared.plan.Attempts)-1 {
 				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: attemptTotal(), Attempts: attempts, EndedAt: ended}); finishErr != nil {
 					return contract.Response{}, finishErr
@@ -535,8 +568,8 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 				return contract.Response{}, normalized
 			}
 			if waitErr := e.waitForRetry(ctx, index, normalized); waitErr != nil {
-				if finishErr := finish(contract.Completion{Token: prepared.token, Status: "cancelled", HTTPStatus: 499, ErrorCode: contract.ErrorProvider, Usage: attemptTotal(), Attempts: attempts, EndedAt: e.clock.Now()}); finishErr != nil {
-					return contract.Response{}, finishErr
+				if settleErr := settleRetryInterruption(waitErr); settleErr != nil {
+					return contract.Response{}, settleErr
 				}
 				return contract.Response{}, waitErr
 			}

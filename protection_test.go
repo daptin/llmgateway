@@ -127,6 +127,29 @@ func TestConcurrencyAdmissionPreventsSecondProviderCall(t *testing.T) {
 	}
 }
 
+func TestInvokeCancellationDuringProviderCallCancelsAccounting(t *testing.T) {
+	clock := testkit.NewAutoClock(time.Now())
+	provider := &blockingAdapter{entered: make(chan struct{}, 1), release: make(chan struct{})}
+	store := testkit.NewMeteringRecorder()
+	engine := protectedEngine(t, testDocument(), provider, store, testkit.NewCounterStore(clock.Now), clock, llmgateway.Options{})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := engine.Invoke(ctx, contract.Principal{}, chatRequest("invoke-cancelled", false))
+		result <- err
+	}()
+	<-provider.entered
+	cancel()
+	err := <-result
+	var gatewayError *contract.Error
+	if !errors.As(err, &gatewayError) || gatewayError.HTTPStatus != 499 {
+		t.Fatalf("invoke cancellation error=%v", err)
+	}
+	if store.State("invoke-cancelled") != "cancelled" {
+		t.Fatalf("invoke cancellation state=%s", store.State("invoke-cancelled"))
+	}
+}
+
 func TestCounterFailureFailsClosedBeforeProvider(t *testing.T) {
 	clock := testkit.NewAutoClock(time.Now())
 	counters := testkit.NewCounterStore(clock.Now)
