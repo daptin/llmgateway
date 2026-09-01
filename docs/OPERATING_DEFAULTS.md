@@ -27,7 +27,7 @@ machine before v1.0.0.
 
 ## Qualification target
 
-Reference topology: one gateway process and one local PostgreSQL 16 instance on
+Reference topology: one gateway process and one local PostgreSQL 17 instance on
 an 8-core, 16-GiB Linux machine, with a deterministic upstream fault server on
 the same network.
 
