@@ -50,6 +50,13 @@ func TestModuleHasNoHostOrMeteringPolicyOwnership(t *testing.T) {
 		}
 		ast.Inspect(file, func(node ast.Node) bool {
 			switch typed := node.(type) {
+			case *ast.BasicLit:
+				if typed.Kind == token.STRING {
+					value, unquoteErr := strconv.Unquote(typed.Value)
+					if unquoteErr == nil && value == "daptin" {
+						t.Errorf("%s embeds Daptin host branding in the reusable module", path)
+					}
+				}
 			case *ast.TypeSpec:
 				if forbiddenSymbols[typed.Name.Name] {
 					t.Errorf("%s declares host-owned metering type %s", path, typed.Name.Name)

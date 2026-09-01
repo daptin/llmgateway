@@ -2,11 +2,14 @@
   "providers": [
     {
       "name": "google",
+      "api_version": "v1beta-openai",
       "api_key_env": "GOOGLE_API_KEY",
       "cases": [
         {"name":"chat","feature":"chat","model":"gemini-3.7-flash"},
         {"name":"chat-stream","feature":"chat_stream","model":"gemini-3.7-flash"},
         {"name":"tools","feature":"chat_tools","model":"gemini-3.7-flash"},
+        {"name":"parallel-tools","feature":"chat_parallel_tools","model":"gemini-3.7-flash"},
+        {"name":"reasoning","feature":"chat_reasoning","model":"gemini-3.7-flash"},
         {"name":"structured","feature":"chat_structured","model":"gemini-3.7-flash"},
         {"name":"vision","feature":"chat_vision","model":"gemini-3.7-flash"},
         {"name":"embedding-string","feature":"embedding_string","model":"gemini-embedding-001"},
@@ -16,6 +19,7 @@
     },
     {
       "name": "openrouter",
+      "api_version": "v1",
       "api_key_env": "OPENROUTER_API_KEY",
       "provider_parameters": {"image_generation_path":"/images"},
       "cases": [
@@ -35,6 +39,7 @@
     },
     {
       "name": "lilac",
+      "api_version": "v1",
       "api_key_env": "LILAC_API_KEY",
       "cases": [
         {"name":"kimi-chat","feature":"chat","model":"moonshotai/kimi-k2.6"},

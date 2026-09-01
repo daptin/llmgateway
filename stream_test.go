@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 	"github.com/daptin/llmgateway/testkit"
 )
 
-func streamEngine(t *testing.T, document catalog.Document, provider adapter.Adapter, store *testkit.MeteringRecorder, options ...llmgateway.Options) *llmgateway.Engine {
+func streamEngine(t *testing.T, document catalog.Document, provider adapter.Adapter, store llmgateway.MeteringPort, options ...llmgateway.Options) *llmgateway.Engine {
 	t.Helper()
 	registry := adapter.NewRegistry()
 	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) { return provider, nil })); err != nil {
@@ -37,6 +38,35 @@ func streamEngine(t *testing.T, document catalog.Document, provider adapter.Adap
 		t.Fatal(err)
 	}
 	return engine
+}
+
+func TestStreamCompletionFailureCannotFallThroughToCancellation(t *testing.T) {
+	provider := testkit.NewFaultAdapter(streamCapabilities(), testkit.AdapterStep{Events: []contract.StreamEvent{
+		{Type: "content_delta", Chat: &contract.ChatDelta{Content: "ok"}},
+		{Type: "finish", Usage: &contract.Usage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}, Terminal: true},
+	}})
+	metering := &terminalFailureMetering{MeteringRecorder: testkit.NewMeteringRecorder()}
+	stream, err := streamEngine(t, testDocument(), provider, metering).Stream(
+		context.Background(), contract.Principal{}, chatRequest("stream-terminal-failure", true),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Next(context.Background()); err == nil {
+		t.Fatal("stream completion persistence failure was hidden")
+	}
+	if err := stream.Close(context.Background()); err != nil {
+		t.Fatalf("close after terminalization failure: %v", err)
+	}
+	if metering.completeCalls.Load() != 1 || metering.cancelCalls.Load() != 0 {
+		t.Fatalf("terminal calls: complete=%d cancel=%d", metering.completeCalls.Load(), metering.cancelCalls.Load())
+	}
+	if state := metering.State("stream-terminal-failure"); state != "held" {
+		t.Fatalf("completion failure changed reservation to %q", state)
+	}
 }
 
 type waitingAdapter struct {
@@ -75,6 +105,71 @@ func (s *waitingStream) Next(ctx context.Context) (contract.StreamEvent, error) 
 	return contract.StreamEvent{}, ctx.Err()
 }
 func (*waitingStream) Close() error { return nil }
+
+type panickingAdapter struct {
+	stage string
+}
+
+func (panickingAdapter) Capabilities() adapter.Capabilities { return streamCapabilities() }
+func (instance panickingAdapter) Invoke(context.Context, catalog.Deployment, contract.Request) (contract.Response, error) {
+	panic("provider invocation payload must not escape")
+}
+func (instance panickingAdapter) Stream(context.Context, catalog.Deployment, contract.Request) (adapter.Stream, error) {
+	if instance.stage == "setup" {
+		panic("provider setup payload must not escape")
+	}
+	return &panickingStream{stage: instance.stage}, nil
+}
+
+type panickingStream struct {
+	stage string
+	first bool
+}
+
+func (stream *panickingStream) Next(context.Context) (contract.StreamEvent, error) {
+	if stream.stage == "read" {
+		panic("provider event payload must not escape")
+	}
+	if !stream.first {
+		stream.first = true
+		return contract.StreamEvent{Type: "content_delta", Chat: &contract.ChatDelta{Content: "safe"}}, nil
+	}
+	return contract.StreamEvent{}, io.EOF
+}
+func (*panickingStream) Close() error { panic("provider close payload must not escape") }
+
+func TestProviderPanicsAreContainedWithoutLeakingValues(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		stage string
+	}{
+		{name: "invoke", stage: "invoke"},
+		{name: "stream setup", stage: "setup"},
+		{name: "stream read", stage: "read"},
+		{name: "stream close", stage: "close"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := testkit.NewMeteringRecorder()
+			engine := streamEngine(t, testDocument(), panickingAdapter{stage: test.stage}, store)
+			var err error
+			if test.stage == "invoke" {
+				_, err = engine.Invoke(context.Background(), contract.Principal{}, chatRequest("panic-invoke", false))
+			} else {
+				var stream contract.EventStream
+				stream, err = engine.Stream(context.Background(), contract.Principal{}, chatRequest("panic-"+test.stage, true))
+				if err == nil && test.stage == "close" {
+					err = stream.Close(context.Background())
+				}
+			}
+			if err == nil || strings.Contains(err.Error(), "payload must not escape") {
+				t.Fatalf("contained panic error = %v", err)
+			}
+			if cause := errors.Unwrap(err); cause != nil && strings.Contains(cause.Error(), "payload must not escape") {
+				t.Fatalf("contained panic cause leaked value: %v", cause)
+			}
+		})
+	}
+}
 
 func TestStreamRetriesBeforeFirstEvent(t *testing.T) {
 	document := testDocument()
@@ -219,6 +314,32 @@ func TestStreamNeverRetriesAfterFirstEvent(t *testing.T) {
 	}
 	if store.State("request") != "finalized" {
 		t.Fatalf("state=%s", store.State("request"))
+	}
+}
+
+func TestStreamEOFWithoutTerminalEventIsFailure(t *testing.T) {
+	fault := testkit.NewFaultAdapter(
+		streamCapabilities(),
+		testkit.AdapterStep{Events: []contract.StreamEvent{{Type: "content_delta", Chat: &contract.ChatDelta{Content: "partial"}}}},
+	)
+	store := testkit.NewMeteringRecorder()
+	stream, err := streamEngine(t, testDocument(), fault, store).Stream(
+		context.Background(), contract.Principal{}, chatRequest("unexpected-eof", true),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, err = stream.Next(context.Background())
+	var gatewayError *contract.Error
+	if !errors.As(err, &gatewayError) || gatewayError.Code != contract.ErrorProvider || gatewayError.HTTPStatus != 502 {
+		t.Fatalf("unexpected EOF error = %v", err)
+	}
+	completion, ok := store.Completion("unexpected-eof")
+	if !ok || completion.Status != "failed" || completion.ErrorCode != contract.ErrorProvider {
+		t.Fatalf("unexpected EOF completion = %+v, present=%v", completion, ok)
 	}
 }
 

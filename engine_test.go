@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -34,11 +35,11 @@ func chatRequest(id string, stream bool) contract.Request {
 	}
 }
 
-func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, metering *testkit.MeteringRecorder, sinks ...llmgateway.TelemetrySink) *llmgateway.Engine {
+func newEngine(t *testing.T, faultAdapter *testkit.FaultAdapter, metering llmgateway.MeteringPort, sinks ...llmgateway.TelemetrySink) *llmgateway.Engine {
 	return newEngineForDocument(t, testDocument(), faultAdapter, metering, sinks...)
 }
 
-func newEngineForDocument(t *testing.T, document catalog.Document, faultAdapter *testkit.FaultAdapter, metering *testkit.MeteringRecorder, sinks ...llmgateway.TelemetrySink) *llmgateway.Engine {
+func newEngineForDocument(t *testing.T, document catalog.Document, faultAdapter *testkit.FaultAdapter, metering llmgateway.MeteringPort, sinks ...llmgateway.TelemetrySink) *llmgateway.Engine {
 	t.Helper()
 	registry := adapter.NewRegistry()
 	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) {
@@ -75,12 +76,35 @@ type deploymentValidatingAdapter struct {
 type closeTrackingAdapter struct {
 	*testkit.FaultAdapter
 	validationErr error
+	closePanic    bool
 	closes        atomic.Int64
+}
+
+type panickingReloadAdapter struct {
+	*testkit.FaultAdapter
+	capabilities bool
+	validation   bool
 }
 
 type capabilityCountingAdapter struct {
 	adapter.Adapter
 	calls atomic.Int64
+}
+
+type terminalFailureMetering struct {
+	*testkit.MeteringRecorder
+	completeCalls atomic.Int64
+	cancelCalls   atomic.Int64
+}
+
+func (metering *terminalFailureMetering) Complete(context.Context, contract.Completion) error {
+	metering.completeCalls.Add(1)
+	return errors.New("terminal persistence unavailable")
+}
+
+func (metering *terminalFailureMetering) Cancel(ctx context.Context, cancellation contract.Cancellation) error {
+	metering.cancelCalls.Add(1)
+	return metering.MeteringRecorder.Cancel(ctx, cancellation)
 }
 
 func (instance *capabilityCountingAdapter) Capabilities() adapter.Capabilities {
@@ -94,6 +118,23 @@ func (adapter *closeTrackingAdapter) ValidateDeployment(catalog.Deployment) erro
 
 func (adapter *closeTrackingAdapter) CloseIdleConnections() {
 	adapter.closes.Add(1)
+	if adapter.closePanic {
+		panic("cleanup payload must not escape")
+	}
+}
+
+func (instance *panickingReloadAdapter) Capabilities() adapter.Capabilities {
+	if instance.capabilities {
+		panic("capability payload must not escape")
+	}
+	return instance.FaultAdapter.Capabilities()
+}
+
+func (instance *panickingReloadAdapter) ValidateDeployment(catalog.Deployment) error {
+	if instance.validation {
+		panic("validation payload must not escape")
+	}
+	return nil
 }
 
 func (a deploymentValidatingAdapter) ValidateDeployment(catalog.Deployment) error { return a.err }
@@ -153,6 +194,29 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 		t.Fatalf("expected ErrDraining, got %v", err)
 	}
 	assertReadyStatus(t, handler, http.StatusServiceUnavailable)
+}
+
+func TestCompletionFailureDoesNotCancelBillableAdmission(t *testing.T) {
+	provider := testkit.NewFaultAdapter(
+		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "response"}, Usage: contract.Usage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}},
+	)
+	metering := &terminalFailureMetering{MeteringRecorder: testkit.NewMeteringRecorder()}
+	engine := newEngine(t, provider, metering)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := engine.Invoke(context.Background(), contract.Principal{}, chatRequest("terminal-failure", false))
+	var public *contract.Error
+	if !errors.As(err, &public) || public.Code != contract.ErrorInternal {
+		t.Fatalf("completion failure = %v", err)
+	}
+	if metering.completeCalls.Load() != 1 || metering.cancelCalls.Load() != 0 {
+		t.Fatalf("terminal calls: complete=%d cancel=%d", metering.completeCalls.Load(), metering.cancelCalls.Load())
+	}
+	if state := metering.State("terminal-failure"); state != "held" {
+		t.Fatalf("completion failure changed reservation to %q", state)
+	}
 }
 
 func TestAdapterCapabilitiesAreSnapshottedAtReload(t *testing.T) {
@@ -215,7 +279,7 @@ func TestReloadAndDrainCloseOnlyUnreachableAdapterSnapshots(t *testing.T) {
 	source := testkit.NewCatalogSource(document)
 	first := &closeTrackingAdapter{FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})}
 	second := &closeTrackingAdapter{FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})}
-	failed := &closeTrackingAdapter{FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}}), validationErr: errors.New("invalid deployment")}
+	failed := &closeTrackingAdapter{FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}}), validationErr: errors.New("invalid deployment"), closePanic: true}
 	instances := []*closeTrackingAdapter{first, second, failed}
 	var build atomic.Int64
 	registry := adapter.NewRegistry()
@@ -257,6 +321,103 @@ func TestReloadAndDrainCloseOnlyUnreachableAdapterSnapshots(t *testing.T) {
 	}
 	if second.closes.Load() != 1 {
 		t.Fatalf("active adapter close count = %d, want 1", second.closes.Load())
+	}
+}
+
+func TestDrainPreventsInProgressReloadFromInstallingANewSnapshot(t *testing.T) {
+	document := testDocument()
+	source := testkit.NewCatalogSource(document)
+	first := &closeTrackingAdapter{FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})}
+	candidate := &closeTrackingAdapter{FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})}
+	buildStarted := make(chan struct{})
+	releaseBuild := make(chan struct{})
+	var builds atomic.Int64
+	registry := adapter.NewRegistry()
+	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) {
+		if builds.Add(1) == 1 {
+			return first, nil
+		}
+		close(buildStarted)
+		<-releaseBuild
+		return candidate, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	clock := testkit.NewAutoClock(time.Now())
+	engine, err := llmgateway.New(llmgateway.Dependencies{
+		Catalog: source, Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Metering: testkit.NewMeteringRecorder(),
+		Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(),
+		Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
+	}, llmgateway.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	document.Revision = 2
+	source.Set(document)
+	reloadResult := make(chan error, 1)
+	go func() { reloadResult <- engine.Reload(context.Background()) }()
+	select {
+	case <-buildStarted:
+	case <-time.After(time.Second):
+		t.Fatal("replacement adapter build did not start")
+	}
+	if err := engine.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseBuild)
+	if err := <-reloadResult; !errors.Is(err, llmgateway.ErrDraining) {
+		t.Fatalf("in-progress reload after drain = %v", err)
+	}
+	if first.closes.Load() != 1 || candidate.closes.Load() != 1 {
+		t.Fatalf("drain/reload closes: active=%d rejected=%d", first.closes.Load(), candidate.closes.Load())
+	}
+}
+
+func TestReloadContainsAdapterExtensionPanics(t *testing.T) {
+	tests := []struct {
+		name    string
+		stage   string
+		factory bool
+		adapter *panickingReloadAdapter
+	}{
+		{name: "factory", stage: "adapter_build", factory: true},
+		{name: "capabilities", stage: "adapter_capabilities", adapter: &panickingReloadAdapter{
+			FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}}), capabilities: true,
+		}},
+		{name: "deployment validation", stage: "deployment_config", adapter: &panickingReloadAdapter{
+			FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}}), validation: true,
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			registry := adapter.NewRegistry()
+			if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) {
+				if test.factory {
+					panic("factory payload must not escape")
+				}
+				return test.adapter, nil
+			})); err != nil {
+				t.Fatal(err)
+			}
+			clock := testkit.NewAutoClock(time.Now())
+			engine, err := llmgateway.New(llmgateway.Dependencies{
+				Catalog: testkit.NewCatalogSource(testDocument()), Adapters: registry, Authorizer: testkit.AllowAuthorizer{},
+				Metering: testkit.NewMeteringRecorder(), Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
+				Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{}, Selector: testkit.NewSelector(0), Clock: clock,
+			}, llmgateway.Options{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := engine.Reload(context.Background()); err == nil || strings.Contains(err.Error(), "payload") {
+				t.Fatalf("unsafe reload error: %v", err)
+			}
+			if status := engine.Status(); status.Ready || status.ReloadStage != test.stage {
+				t.Fatalf("status = %+v", status)
+			}
+		})
 	}
 }
 
@@ -594,6 +755,26 @@ func TestEngineDoesNotRetryNonRetryableFailure(t *testing.T) {
 	}
 	if store.State("request") != "finalized" {
 		t.Fatalf("metering state=%s", store.State("request"))
+	}
+}
+
+func TestEngineNormalizesMalformedTypedProviderError(t *testing.T) {
+	provider := testkit.NewFaultAdapter(
+		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		testkit.AdapterStep{InvokeError: &contract.Error{Code: "provider-secret", Message: "unsafe", HTTPStatus: 0, Retryable: true, RetryAfter: time.Hour}},
+	)
+	store := testkit.NewMeteringRecorder()
+	engine := newEngine(t, provider, store)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := engine.Invoke(context.Background(), contract.Principal{}, chatRequest("malformed-error", false))
+	var public *contract.Error
+	if !errors.As(err, &public) || public.Code != contract.ErrorProvider || public.HTTPStatus != http.StatusBadGateway || public.Retryable {
+		t.Fatalf("malformed typed error normalized to %#v", err)
+	}
+	if attempts := provider.Attempts(); len(attempts) != 1 {
+		t.Fatalf("malformed typed error triggered retries: %v", attempts)
 	}
 }
 

@@ -80,9 +80,7 @@ func (s *CounterStore) Acquire(ctx context.Context, key string, maximum int64, t
 	s.next++
 	token := fmt.Sprintf("lease-%d", s.next)
 	value.value++
-	if value.expiresAt.IsZero() {
-		value.expiresAt = s.now().Add(ttl)
-	}
+	value.expiresAt = s.now().Add(ttl)
 	s.values[key] = value
 	s.leases[token] = key
 	return token, nil

@@ -85,7 +85,7 @@
       "response_fields": {"created":"translated","data":"translated"}
     },
     {"method": "GET", "path": "/v1/models", "request_fields": {}, "response_fields": {"object":"native","data":"translated"}},
-    {"method": "GET", "path": "/v1/models/{id}", "request_fields": {}, "response_fields": {"id":"native","object":"native","created":"translated","owned_by":"translated","daptin":"native"}}
+    {"method": "GET", "path": "/v1/models/{id}", "request_fields": {}, "response_fields": {"id":"native","object":"native","created":"translated","owned_by":"translated","llmgateway":"native"}}
   ],
   "providers": [
     {"name": "openai-compatible", "operations": {"chat": "translated", "responses": "translated", "embeddings": "translated", "image_generation": "translated"}}

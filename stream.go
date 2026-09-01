@@ -56,13 +56,15 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 	if err != nil {
 		return nil, err
 	}
+	terminalizationAttempted := false
 	transferred := false
 	defer func() {
-		if !transferred {
+		if !transferred && !terminalizationAttempted {
 			_ = e.cancelPrepared(ctx, prepared, contract.Cancellation{Token: prepared.token, Reason: "stream_setup_abandoned", EndedAt: e.clock.Now()})
 		}
 	}()
 	finish := func(completion contract.Completion) error {
+		terminalizationAttempted = true
 		if finishErr := e.finalizePrepared(ctx, prepared, completion); finishErr != nil {
 			return finishErr
 		}
@@ -70,6 +72,7 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 		return nil
 	}
 	cancelAdmission := func(cancellation contract.Cancellation) error {
+		terminalizationAttempted = true
 		if cancelErr := e.cancelPrepared(ctx, prepared, cancellation); cancelErr != nil {
 			return cancelErr
 		}
@@ -234,10 +237,11 @@ func (s *GatewayStream) Next(ctx context.Context) (contract.StreamEvent, error) 
 	s.observeUsage(event.Usage)
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			if finishErr := s.finishLocked(ctx, "succeeded", 200, "", false); finishErr != nil {
+			normalized := publicError(contract.ErrorProvider, "upstream stream ended unexpectedly", 502, false, io.ErrUnexpectedEOF)
+			if finishErr := s.finishLocked(ctx, "failed", normalized.HTTPStatus, normalized.Code, normalized.Retryable); finishErr != nil {
 				return contract.StreamEvent{}, finishErr
 			}
-			return contract.StreamEvent{}, io.EOF
+			return contract.StreamEvent{}, normalized
 		}
 		normalized := normalizeError(err, contract.ErrorProvider, 502, false)
 		if normalized.HTTPStatus == 499 {
@@ -313,6 +317,7 @@ func (s *GatewayStream) cancelLocked(ctx context.Context, reason string) error {
 
 func (s *GatewayStream) finishLocked(ctx context.Context, status string, httpStatus int, code contract.ErrorCode, retryable bool) error {
 	defer s.releaseRequest()
+	s.terminal = true
 	ended := s.engine.clock.Now()
 	usage, usageErr := settledUsage(s.usage, s.prepared.request.EstimatedUsage, s.route.Deployment.Pricing)
 	if usageErr != nil || !usage.Valid() {
@@ -352,7 +357,6 @@ func (s *GatewayStream) finishLocked(ctx context.Context, status string, httpSta
 	}); err != nil {
 		return err
 	}
-	s.terminal = true
 	if closeErr != nil {
 		return normalizeError(closeErr, contract.ErrorProvider, 502, false)
 	}

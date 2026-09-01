@@ -18,8 +18,11 @@ func FuzzDecodeOneNeverAcceptsTrailingDocument(f *testing.F) {
 		Name string `json:"name"`
 	}
 	f.Fuzz(func(t *testing.T, payload []byte) {
+		if len(payload) > 1<<20 {
+			return
+		}
 		var decoded document
-		if err := DecodeOne(bytes.NewReader(payload), &decoded); err != nil || len(payload) > 1<<20 {
+		if err := DecodeOne(bytes.NewReader(payload), &decoded); err != nil {
 			return
 		}
 		combined := make([]byte, 0, len(payload)+18)

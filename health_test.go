@@ -18,13 +18,32 @@ import (
 type healthAdapter struct {
 	*testkit.FaultAdapter
 	healthErr   error
+	healthPanic bool
+	healthStart chan<- struct{}
+	healthWait  <-chan struct{}
 	healthCalls atomic.Int64
+	closes      atomic.Int64
 }
 
-func (a *healthAdapter) HealthCheck(context.Context, catalog.Deployment) error {
+func (a *healthAdapter) HealthCheck(ctx context.Context, _ catalog.Deployment) error {
 	a.healthCalls.Add(1)
+	if a.healthStart != nil {
+		a.healthStart <- struct{}{}
+	}
+	if a.healthWait != nil {
+		select {
+		case <-a.healthWait:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	if a.healthPanic {
+		panic("health payload must not escape")
+	}
 	return a.healthErr
 }
+
+func (a *healthAdapter) CloseIdleConnections() { a.closes.Add(1) }
 
 func healthEngine(t *testing.T, provider adapter.Adapter, counters llmgateway.CounterStore, options llmgateway.Options, checks ...catalog.HealthCheck) *llmgateway.Engine {
 	t.Helper()
@@ -99,6 +118,71 @@ func TestFailedProbeOpensInfrastructureCircuit(t *testing.T) {
 	var gatewayError *contract.Error
 	if !errors.As(err, &gatewayError) || gatewayError.Code != contract.ErrorUnavailable {
 		t.Fatalf("failed probe did not open circuit: %v", err)
+	}
+}
+
+func TestPanickingProbeIsContainedAndOpensInfrastructureCircuit(t *testing.T) {
+	fault := testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})
+	provider := &healthAdapter{FaultAdapter: fault, healthPanic: true}
+	engine := healthEngine(t, provider, testkit.NewCounterStore(time.Now), llmgateway.Options{}, catalog.HealthCheck{Enabled: true, FailureThreshold: 1})
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	report, err := engine.Probe(context.Background())
+	if err != nil || report.Unhealthy != 1 || provider.healthCalls.Load() != 1 {
+		t.Fatalf("report=%+v calls=%d err=%v", report, provider.healthCalls.Load(), err)
+	}
+	_, err = engine.Invoke(context.Background(), contract.Principal{}, chatRequest("panic-open-circuit", false))
+	var gatewayError *contract.Error
+	if !errors.As(err, &gatewayError) || gatewayError.Code != contract.ErrorUnavailable {
+		t.Fatalf("panicking probe did not open circuit: %v", err)
+	}
+}
+
+func TestDrainWaitsForHealthProbeBeforeClosingSnapshot(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	provider := &healthAdapter{
+		FaultAdapter: testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}}),
+		healthStart:  started, healthWait: release,
+	}
+	engine := healthEngine(t, provider, testkit.NewCounterStore(time.Now), llmgateway.Options{})
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	probeResult := make(chan error, 1)
+	go func() {
+		_, err := engine.Probe(context.Background())
+		probeResult <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("health probe did not start")
+	}
+	drainContext, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	if err := engine.Drain(drainContext); !errors.Is(err, context.DeadlineExceeded) {
+		cancel()
+		t.Fatalf("drain during probe = %v", err)
+	}
+	cancel()
+	if provider.closes.Load() != 0 {
+		t.Fatal("active health adapter was closed")
+	}
+	close(release)
+	select {
+	case err := <-probeResult:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("health probe did not finish")
+	}
+	if err := engine.Drain(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if provider.closes.Load() != 1 {
+		t.Fatalf("health adapter close count = %d, want 1", provider.closes.Load())
 	}
 }
 

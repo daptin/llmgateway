@@ -37,3 +37,28 @@ func TestCounterStoreFixedExpiryAndLeases(t *testing.T) {
 		t.Fatalf("lease was not released: %v", err)
 	}
 }
+
+func TestCounterStoreAggregateExpiryCoversNewestLease(t *testing.T) {
+	clock := NewClock(time.Date(2026, time.September, 1, 0, 0, 0, 0, time.UTC))
+	store := NewCounterStore(clock.Now)
+	ctx := context.Background()
+	first, err := store.Acquire(ctx, "deployment", 2, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(40 * time.Second)
+	second, err := store.Acquire(ctx, "deployment", 2, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(30 * time.Second)
+	if _, err := store.Acquire(ctx, "deployment", 2, time.Minute); !errors.Is(err, llmgateway.ErrCounterLimit) {
+		t.Fatalf("aggregate expired before newest lease: %v", err)
+	}
+	if err := store.Release(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Release(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+}

@@ -20,6 +20,7 @@ type eventStream struct {
 	operation contract.Operation
 	maximum   int
 	usage     contract.Usage
+	pending   []contract.StreamEvent
 	done      bool
 	closeOnce sync.Once
 }
@@ -35,10 +36,15 @@ func (s *eventStream) Next(ctx context.Context) (contract.StreamEvent, error) {
 	if err := ctx.Err(); err != nil {
 		return contract.StreamEvent{}, err
 	}
+	if len(s.pending) > 0 {
+		event := s.pending[0]
+		s.pending = s.pending[1:]
+		return s.deliver(event), nil
+	}
 	name, data, err := s.nextFrame()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
-			return contract.StreamEvent{}, io.ErrUnexpectedEOF
+			return contract.StreamEvent{}, providerFailure("upstream stream ended before [DONE]", io.ErrUnexpectedEOF)
 		}
 		return contract.StreamEvent{}, err
 	}
@@ -50,7 +56,12 @@ func (s *eventStream) Next(ctx context.Context) (contract.StreamEvent, error) {
 	var event contract.StreamEvent
 	switch s.operation {
 	case contract.OperationChat:
-		event, err = decodeChatEvent(data)
+		var events []contract.StreamEvent
+		events, err = decodeChatEvents(data)
+		if err == nil {
+			event = events[0]
+			s.pending = append(s.pending, events[1:]...)
+		}
 	case contract.OperationResponses:
 		event, err = decodeResponsesEvent(name, data)
 	default:
@@ -59,13 +70,17 @@ func (s *eventStream) Next(ctx context.Context) (contract.StreamEvent, error) {
 	if err != nil {
 		return contract.StreamEvent{}, providerFailure("upstream returned an invalid stream event", err)
 	}
+	return s.deliver(event), nil
+}
+
+func (s *eventStream) deliver(event contract.StreamEvent) contract.StreamEvent {
 	if event.Usage != nil {
 		s.usage = *event.Usage
 	}
 	if event.Terminal {
 		s.done = true
 	}
-	return event, nil
+	return event
 }
 
 func (s *eventStream) Close() error {
@@ -128,35 +143,44 @@ type chatChunkWire struct {
 	Usage *usageWire `json:"usage"`
 }
 
-func decodeChatEvent(data []byte) (contract.StreamEvent, error) {
+func decodeChatEvents(data []byte) ([]contract.StreamEvent, error) {
 	var wire chatChunkWire
 	if err := json.Unmarshal(data, &wire); err != nil {
-		return contract.StreamEvent{}, err
+		return nil, err
 	}
-	event := contract.StreamEvent{Type: "content_delta"}
+	var usage *contract.Usage
 	if wire.Usage != nil {
-		usage := canonicalUsage(*wire.Usage)
-		event.Usage = &usage
+		value := canonicalUsage(*wire.Usage)
+		usage = &value
 	}
 	if len(wire.Choices) == 0 {
-		if wire.Usage == nil {
-			return contract.StreamEvent{}, errors.New("chat stream event has neither choices nor usage")
+		if usage == nil {
+			return nil, errors.New("chat stream event has neither choices nor usage")
 		}
-		event.Type = "usage"
-		return event, nil
+		return []contract.StreamEvent{{Type: "usage", Usage: usage}}, nil
 	}
-	choice := wire.Choices[0]
-	delta := &contract.ChatDelta{ID: wire.ID, Created: wire.Created, Index: choice.Index, Role: choice.Delta.Role, Content: choice.Delta.Content, Logprobs: append([]byte(nil), choice.Logprobs...)}
-	if choice.FinishReason != nil {
-		delta.FinishReason = *choice.FinishReason
-		event.Type = "finish"
+	events := make([]contract.StreamEvent, 0, len(wire.Choices))
+	indexes := make(map[int]bool, len(wire.Choices))
+	for _, choice := range wire.Choices {
+		if choice.Index < 0 || indexes[choice.Index] {
+			return nil, errors.New("chat stream event contains invalid choice indices")
+		}
+		indexes[choice.Index] = true
+		event := contract.StreamEvent{Type: "content_delta"}
+		delta := &contract.ChatDelta{ID: wire.ID, Created: wire.Created, Index: choice.Index, Role: choice.Delta.Role, Content: choice.Delta.Content, Logprobs: append([]byte(nil), choice.Logprobs...)}
+		for _, call := range choice.Delta.ToolCalls {
+			delta.ToolCalls = append(delta.ToolCalls, contract.ToolCallDelta{Index: call.Index, ID: call.ID, Type: call.Type, Function: contract.FunctionCall{Name: call.Function.Name, Arguments: call.Function.Arguments}})
+			event.Type = "tool_call_delta"
+		}
+		if choice.FinishReason != nil {
+			delta.FinishReason = *choice.FinishReason
+			event.Type = "finish"
+		}
+		event.Chat = delta
+		events = append(events, event)
 	}
-	for _, call := range choice.Delta.ToolCalls {
-		delta.ToolCalls = append(delta.ToolCalls, contract.ToolCallDelta{Index: call.Index, ID: call.ID, Type: call.Type, Function: contract.FunctionCall{Name: call.Function.Name, Arguments: call.Function.Arguments}})
-		event.Type = "tool_call_delta"
-	}
-	event.Chat = delta
-	return event, nil
+	events[len(events)-1].Usage = usage
+	return events, nil
 }
 
 type responsesEventWire struct {
@@ -166,7 +190,6 @@ type responsesEventWire struct {
 	Delta      string          `json:"delta"`
 	Item       json.RawMessage `json:"item"`
 	Response   json.RawMessage `json:"response"`
-	Error      json.RawMessage `json:"error"`
 }
 
 func decodeResponsesEvent(name string, data []byte) (contract.StreamEvent, error) {
@@ -181,7 +204,7 @@ func decodeResponsesEvent(name string, data []byte) (contract.StreamEvent, error
 		return contract.StreamEvent{}, errors.New("responses stream event has no type")
 	}
 	if name == "error" {
-		return contract.StreamEvent{}, &contract.Error{Code: contract.ErrorProvider, Message: "upstream response stream failed", HTTPStatus: 502, Cause: errors.New(string(wire.Error))}
+		return contract.StreamEvent{}, &contract.Error{Code: contract.ErrorProvider, Message: "upstream response stream failed", HTTPStatus: 502}
 	}
 	delta := &contract.ResponseDelta{ResponseID: wire.ResponseID, Sequence: wire.Sequence, Delta: wire.Delta}
 	if len(wire.Item) > 0 {

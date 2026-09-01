@@ -20,6 +20,16 @@ const (
 	ErrorInternal          ErrorCode = "internal_error"
 )
 
+func (code ErrorCode) Valid() bool {
+	switch code {
+	case ErrorInvalidRequest, ErrorAuthentication, ErrorPermission, ErrorModelNotFound, ErrorRateLimit,
+		ErrorInsufficientQuota, ErrorTimeout, ErrorUnavailable, ErrorProvider, ErrorInternal:
+		return true
+	default:
+		return false
+	}
+}
+
 // Error is safe to expose at a protocol boundary. Cause is deliberately not
 // serialized and must only be consumed by redacting telemetry sinks.
 type Error struct {

@@ -3,6 +3,7 @@ package openaicompat
 import (
 	"bytes"
 	"encoding/json"
+	"sort"
 
 	"github.com/daptin/llmgateway/contract"
 )
@@ -19,6 +20,9 @@ type usageWire struct {
 	InputDetails struct {
 		CachedTokens int64 `json:"cached_tokens"`
 	} `json:"input_tokens_details"`
+	CompletionDetails struct {
+		ReasoningTokens int64 `json:"reasoning_tokens"`
+	} `json:"completion_tokens_details"`
 	OutputDetails struct {
 		ReasoningTokens int64 `json:"reasoning_tokens"`
 	} `json:"output_tokens_details"`
@@ -103,7 +107,12 @@ func decodeResponse(operation contract.Operation, payload []byte) (contract.Resp
 			return contract.Response{}, providerFailure("upstream returned an invalid chat response", err)
 		}
 		result := contract.Response{Model: wire.Model, Chat: &contract.ChatResponse{ID: wire.ID, Created: wire.Created}, Usage: canonicalUsage(wire.Usage)}
+		indexes := make(map[int]bool, len(wire.Choices))
 		for _, choice := range wire.Choices {
+			if choice.Index < 0 || indexes[choice.Index] {
+				return contract.Response{}, providerFailure("upstream returned invalid chat choice indices", nil)
+			}
+			indexes[choice.Index] = true
 			message := contract.Message{Role: choice.Message.Role}
 			content := bytes.TrimSpace(choice.Message.Content)
 			if len(content) > 0 && !bytes.Equal(content, []byte("null")) {
@@ -118,10 +127,16 @@ func decodeResponse(operation contract.Operation, payload []byte) (contract.Resp
 			}
 			result.Chat.Choices = append(result.Chat.Choices, contract.ChatChoice{Index: choice.Index, Message: message, FinishReason: choice.FinishReason, Logprobs: append([]byte(nil), choice.Logprobs...)})
 		}
+		sort.Slice(result.Chat.Choices, func(i, j int) bool { return result.Chat.Choices[i].Index < result.Chat.Choices[j].Index })
+		for index := range result.Chat.Choices {
+			if result.Chat.Choices[index].Index != index {
+				return contract.Response{}, providerFailure("upstream returned non-contiguous chat choice indices", nil)
+			}
+		}
 		return result, nil
 	case contract.OperationResponses:
 		var wire responsesResponseWire
-		if err := json.Unmarshal(payload, &wire); err != nil || wire.ID == "" {
+		if err := json.Unmarshal(payload, &wire); err != nil || wire.ID == "" || wire.Status == "" || wire.Output == nil {
 			return contract.Response{}, providerFailure("upstream returned an invalid responses response", err)
 		}
 		result := contract.Response{Model: wire.Model, Responses: &contract.ResponsesResponse{ID: wire.ID, Status: wire.Status}, Usage: canonicalUsage(wire.Usage)}
@@ -142,16 +157,29 @@ func decodeResponse(operation contract.Operation, payload []byte) (contract.Resp
 			return contract.Response{}, providerFailure("upstream returned an invalid embeddings response", err)
 		}
 		result := contract.Response{Model: wire.Model, Embeddings: &contract.EmbeddingsResponse{}, Usage: canonicalUsage(wire.Usage)}
+		indexes := make(map[int]bool, len(wire.Data))
 		for _, item := range wire.Data {
+			if item.Index < 0 || indexes[item.Index] {
+				return contract.Response{}, providerFailure("upstream returned invalid embedding indices", nil)
+			}
+			indexes[item.Index] = true
 			embedding := contract.Embedding{Index: item.Index}
 			if len(item.Embedding) > 0 && item.Embedding[0] == '"' {
-				if err := json.Unmarshal(item.Embedding, &embedding.Base64); err != nil {
+				if err := json.Unmarshal(item.Embedding, &embedding.Base64); err != nil || embedding.Base64 == "" {
 					return contract.Response{}, providerFailure("upstream returned an invalid base64 embedding", err)
 				}
-			} else if err := json.Unmarshal(item.Embedding, &embedding.Vector); err != nil {
-				return contract.Response{}, providerFailure("upstream returned an invalid embedding vector", err)
+			} else {
+				if err := json.Unmarshal(item.Embedding, &embedding.Vector); err != nil || len(embedding.Vector) == 0 {
+					return contract.Response{}, providerFailure("upstream returned an invalid embedding vector", err)
+				}
 			}
 			result.Embeddings.Data = append(result.Embeddings.Data, embedding)
+		}
+		sort.Slice(result.Embeddings.Data, func(i, j int) bool { return result.Embeddings.Data[i].Index < result.Embeddings.Data[j].Index })
+		for index := range result.Embeddings.Data {
+			if result.Embeddings.Data[index].Index != index {
+				return contract.Response{}, providerFailure("upstream returned non-contiguous embedding indices", nil)
+			}
 		}
 		return result, nil
 	case contract.OperationImageGeneration:
@@ -189,5 +217,9 @@ func canonicalUsage(wire usageWire) contract.Usage {
 	if cacheRead == 0 {
 		cacheRead = wire.PromptDetails.CachedTokens
 	}
-	return contract.Usage{InputTokens: input, OutputTokens: output, TotalTokens: total, CacheReadTokens: cacheRead, ReasoningTokens: wire.OutputDetails.ReasoningTokens}
+	reasoning := wire.OutputDetails.ReasoningTokens
+	if reasoning == 0 {
+		reasoning = wire.CompletionDetails.ReasoningTokens
+	}
+	return contract.Usage{InputTokens: input, OutputTokens: output, TotalTokens: total, CacheReadTokens: cacheRead, ReasoningTokens: reasoning}
 }

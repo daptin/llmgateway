@@ -1,7 +1,7 @@
 package openaicompat
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
 	"io"
 	"net/http"
@@ -12,18 +12,12 @@ import (
 	"github.com/daptin/llmgateway/contract"
 )
 
-type errorEnvelope struct {
-	Error struct {
-		Message string `json:"message"`
-		Type    string `json:"type"`
-		Code    any    `json:"code"`
-	} `json:"error"`
-}
-
 func (a *Adapter) providerError(response *http.Response) error {
-	payload, readErr := readBounded(response.Body, min(a.maxResponseBytes, 64<<10))
-	var envelope errorEnvelope
-	_ = json.Unmarshal(payload, &envelope)
+	_, readErr := readBounded(response.Body, min(a.maxResponseBytes, 64<<10))
+	publicStatus := response.StatusCode
+	if publicStatus < http.StatusBadRequest {
+		publicStatus = http.StatusBadGateway
+	}
 	code := contract.ErrorProvider
 	message := "upstream provider failed"
 	retryable := response.StatusCode == http.StatusRequestTimeout || response.StatusCode == http.StatusConflict || response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500
@@ -51,10 +45,11 @@ func (a *Adapter) providerError(response *http.Response) error {
 		message = "upstream provider timed out"
 	}
 	cause := readErr
-	if envelope.Error.Message != "" {
-		cause = errors.New(envelope.Error.Message)
+	var retryDelay time.Duration
+	if retryable {
+		retryDelay = retryAfter(response.Header.Get("Retry-After"), a.now())
 	}
-	return &contract.Error{Code: code, Message: message, HTTPStatus: response.StatusCode, Retryable: retryable, RetryAfter: retryAfter(response.Header.Get("Retry-After"), a.now()), Cause: cause}
+	return &contract.Error{Code: code, Message: message, HTTPStatus: publicStatus, Retryable: retryable, RetryAfter: retryDelay, Cause: cause}
 }
 
 func retryAfter(value string, now time.Time) time.Duration {
@@ -83,6 +78,12 @@ func invalidRequest(message string, cause error) *contract.Error {
 }
 
 func providerFailure(message string, cause error) *contract.Error {
+	if errors.Is(cause, context.DeadlineExceeded) {
+		return &contract.Error{Code: contract.ErrorTimeout, Message: "upstream provider timed out", HTTPStatus: http.StatusGatewayTimeout, Retryable: true, Cause: cause}
+	}
+	if errors.Is(cause, context.Canceled) {
+		return &contract.Error{Code: contract.ErrorProvider, Message: "upstream request cancelled", HTTPStatus: 499, Cause: cause}
+	}
 	if errors.Is(cause, io.EOF) {
 		cause = errors.New("upstream response ended unexpectedly")
 	}

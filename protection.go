@@ -16,6 +16,29 @@ type attemptLease struct {
 	probe       string
 }
 
+// callExtension contains panics from adapter and guardrail implementations.
+// Extension code is untrusted with respect to process availability, and panic
+// values are deliberately excluded because they may contain provider data.
+func callExtension[T any](operation string, call func() (T, error)) (value T, err error) {
+	defer func() {
+		if recover() != nil {
+			err = fmt.Errorf("%s panicked", operation)
+		}
+	}()
+	return call()
+}
+
+func closeExtensionIdleConnections(instance any, operation string) {
+	closer, ok := instance.(adapter.IdleConnectionCloser)
+	if !ok {
+		return
+	}
+	_, _ = callExtension(operation, func() (struct{}, error) {
+		closer.CloseIdleConnections()
+		return struct{}{}, nil
+	})
+}
+
 func (e *Engine) beforeAttempt(ctx context.Context, deployment catalog.Deployment, request contract.Request) (attemptLease, error) {
 	prefix := "llmgateway:deployment:" + string(deployment.ID) + ":"
 	if open, _, err := e.counters.Get(ctx, prefix+"rate_cooldown"); err != nil {
@@ -132,8 +155,8 @@ func transientCounterError(cause error) *contract.Error {
 
 func (e *Engine) invokeProvider(ctx context.Context, provider adapter.Adapter, deployment catalog.Deployment, request contract.Request, lease attemptLease) (response contract.Response, result *contract.Error) {
 	defer func() {
-		if recovered := recover(); recovered != nil {
-			result = publicError(contract.ErrorProvider, "upstream provider failed", 502, false, fmt.Errorf("provider panic: %v", recovered))
+		if recover() != nil {
+			result = publicError(contract.ErrorProvider, "upstream provider failed", 502, false, errors.New("provider invocation panicked"))
 			e.afterAttempt(ctx, deployment, lease, result)
 			return
 		}
@@ -148,8 +171,8 @@ func (e *Engine) invokeProvider(ctx context.Context, provider adapter.Adapter, d
 
 func (e *Engine) openProviderStream(ctx context.Context, provider adapter.Adapter, deployment catalog.Deployment, request contract.Request, lease attemptLease) (stream adapter.Stream, result *contract.Error) {
 	defer func() {
-		if recovered := recover(); recovered != nil {
-			result = publicError(contract.ErrorProvider, "upstream provider failed", 502, false, fmt.Errorf("provider panic: %v", recovered))
+		if recover() != nil {
+			result = publicError(contract.ErrorProvider, "upstream provider failed", 502, false, errors.New("provider stream setup panicked"))
 			e.afterAttempt(ctx, deployment, lease, result)
 		}
 	}()
@@ -163,8 +186,8 @@ func (e *Engine) openProviderStream(ctx context.Context, provider adapter.Adapte
 
 func nextProviderEvent(ctx context.Context, stream adapter.Stream) (event contract.StreamEvent, err error) {
 	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = publicError(contract.ErrorProvider, "upstream provider failed", 502, false, fmt.Errorf("provider stream panic: %v", recovered))
+		if recover() != nil {
+			err = publicError(contract.ErrorProvider, "upstream provider failed", 502, false, errors.New("provider stream read panicked"))
 		}
 	}()
 	return stream.Next(ctx)
@@ -209,8 +232,8 @@ func firstSemanticEventWithin(ctx context.Context, stream adapter.Stream, timeou
 
 func closeProviderStream(stream adapter.Stream) (err error) {
 	defer func() {
-		if recovered := recover(); recovered != nil {
-			err = fmt.Errorf("provider stream close panic: %v", recovered)
+		if recover() != nil {
+			err = errors.New("provider stream close panicked")
 		}
 	}()
 	return stream.Close()

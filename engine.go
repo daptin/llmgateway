@@ -74,8 +74,11 @@ func (r *runtimeSnapshot) closeIdleConnections() {
 	}
 	r.closeOnce.Do(func() {
 		for _, instance := range r.adapters {
-			if closer, ok := instance.(adapter.IdleConnectionCloser); ok {
-				closer.CloseIdleConnections()
+			closeExtensionIdleConnections(instance, "adapter idle connection cleanup")
+		}
+		for _, configured := range r.guardrails {
+			for _, instance := range configured {
+				closeExtensionIdleConnections(instance.checker, "guardrail idle connection cleanup")
 			}
 		}
 	})
@@ -279,10 +282,14 @@ func (e *Engine) Reload(ctx context.Context) error {
 				return fmt.Errorf("resolve provider %q secret: %w", provider.ID, err)
 			}
 		}
-		instance, buildErr := factory.Build(ctx, provider, adapter.NewSecret(secretBytes))
-		for index := range secretBytes {
-			secretBytes[index] = 0
-		}
+		instance, buildErr := callExtension("adapter factory", func() (adapter.Adapter, error) {
+			defer func() {
+				for index := range secretBytes {
+					secretBytes[index] = 0
+				}
+			}()
+			return factory.Build(ctx, provider, adapter.NewSecret(secretBytes))
+		})
 		if buildErr != nil {
 			e.recordReloadFailure(document.Revision, "adapter_build")
 			return fmt.Errorf("build provider %q adapter: %w", provider.ID, buildErr)
@@ -292,7 +299,13 @@ func (e *Engine) Reload(ctx context.Context) error {
 			return fmt.Errorf("provider %q adapter factory returned nil", provider.ID)
 		}
 		candidate.adapters[provider.ID] = instance
-		declared := instance.Capabilities()
+		declared, capabilitiesErr := callExtension("adapter capabilities", func() (adapter.Capabilities, error) {
+			return instance.Capabilities(), nil
+		})
+		if capabilitiesErr != nil {
+			e.recordReloadFailure(document.Revision, "adapter_capabilities")
+			return fmt.Errorf("read provider %q adapter capabilities: %w", provider.ID, capabilitiesErr)
+		}
 		operations := make(map[contract.Operation]bool, len(declared.Operations))
 		for operation, supported := range declared.Operations {
 			operations[operation] = supported
@@ -309,7 +322,10 @@ func (e *Engine) Reload(ctx context.Context) error {
 		}
 		instance := candidate.adapters[deployment.ProviderID]
 		if validator, ok := instance.(adapter.DeploymentValidator); ok {
-			if validateErr := validator.ValidateDeployment(deployment); validateErr != nil {
+			_, validateErr := callExtension("adapter deployment validation", func() (struct{}, error) {
+				return struct{}{}, validator.ValidateDeployment(deployment)
+			})
+			if validateErr != nil {
 				e.recordReloadFailure(document.Revision, "deployment_config")
 				return fmt.Errorf("validate deployment %q: %w", deployment.ID, validateErr)
 			}
@@ -330,7 +346,9 @@ func (e *Engine) Reload(ctx context.Context) error {
 				e.recordReloadFailure(document.Revision, "guardrail_registry")
 				return fmt.Errorf("guardrail %q uses unregistered kind %q", configuration.ID, configuration.Kind)
 			}
-			checker, buildErr := factory.Build(configuration)
+			checker, buildErr := callExtension("guardrail factory", func() (guardrail.Checker, error) {
+				return factory.Build(configuration)
+			})
 			if buildErr != nil {
 				e.recordReloadFailure(document.Revision, "guardrail_build")
 				return fmt.Errorf("build guardrail %q: %w", configuration.ID, buildErr)
@@ -339,17 +357,41 @@ func (e *Engine) Reload(ctx context.Context) error {
 				e.recordReloadFailure(document.Revision, "guardrail_build")
 				return fmt.Errorf("guardrail %q factory returned nil", configuration.ID)
 			}
-			candidate.guardrails[model.ID] = append(candidate.guardrails[model.ID], runtimeGuardrail{configuration: configuration, checker: checker})
+			bound, propertiesErr := callExtension("guardrail properties", func() (runtimeGuardrail, error) {
+				return runtimeGuardrail{
+					configuration: configuration, checker: checker,
+					supportsStreaming: checker.SupportsStreaming(), cacheStable: checker.CacheStable(),
+				}, nil
+			})
+			if propertiesErr != nil {
+				closeExtensionIdleConnections(checker, "guardrail idle connection cleanup")
+				e.recordReloadFailure(document.Revision, "guardrail_config")
+				return fmt.Errorf("read guardrail %q properties: %w", configuration.ID, propertiesErr)
+			}
+			candidate.guardrails[model.ID] = append(candidate.guardrails[model.ID], bound)
 		}
 	}
 	current := e.snapshot.Load()
 	if current != nil && candidate.catalog.Revision() <= current.catalog.Revision() {
 		return catalog.ErrStaleRevision
 	}
+	e.activeMu.Lock()
+	if e.draining.Load() {
+		e.activeMu.Unlock()
+		return ErrDraining
+	}
 	previous := e.snapshot.Swap(candidate)
 	installed = true
 	if previous != nil {
-		e.retire(previous)
+		if e.activeRequests == 0 {
+			e.activeMu.Unlock()
+			previous.closeIdleConnections()
+		} else {
+			e.retired = append(e.retired, previous)
+			e.activeMu.Unlock()
+		}
+	} else {
+		e.activeMu.Unlock()
 	}
 	e.pruneHealthState(compiled)
 	e.statusMu.Lock()
@@ -465,24 +507,24 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 	if err != nil {
 		return contract.Response{}, err
 	}
-	settled := false
+	terminalizationAttempted := false
 	defer func() {
-		if !settled {
+		if !terminalizationAttempted {
 			_ = e.cancelPrepared(ctx, prepared, contract.Cancellation{Token: prepared.token, Reason: "invoke_abandoned", EndedAt: e.clock.Now()})
 		}
 	}()
 	finish := func(completion contract.Completion) error {
+		terminalizationAttempted = true
 		if finishErr := e.finalizePrepared(ctx, prepared, completion); finishErr != nil {
 			return finishErr
 		}
-		settled = true
 		return nil
 	}
 	cancelAdmission := func(cancellation contract.Cancellation) error {
+		terminalizationAttempted = true
 		if cancelErr := e.cancelPrepared(ctx, prepared, cancellation); cancelErr != nil {
 			return cancelErr
 		}
-		settled = true
 		return nil
 	}
 	if cacheHit {
@@ -763,17 +805,6 @@ func (e *Engine) endRequest() {
 	}
 }
 
-func (e *Engine) retire(snapshot *runtimeSnapshot) {
-	e.activeMu.Lock()
-	if e.activeRequests == 0 {
-		e.activeMu.Unlock()
-		snapshot.closeIdleConnections()
-		return
-	}
-	e.retired = append(e.retired, snapshot)
-	e.activeMu.Unlock()
-}
-
 func (e *Engine) closeSnapshots() {
 	e.activeMu.Lock()
 	retired := e.retired
@@ -880,7 +911,14 @@ func (e *Engine) waitForRetry(ctx context.Context, failureIndex int, failure *co
 func normalizeError(err error, fallback contract.ErrorCode, status int, retryable bool) *contract.Error {
 	var gatewayError *contract.Error
 	if errors.As(err, &gatewayError) {
-		return gatewayError.Safe()
+		safe := gatewayError.Safe()
+		if safe.Code.Valid() && safe.Message != "" && safe.HTTPStatus >= 400 && safe.HTTPStatus <= 599 {
+			if !safe.Retryable {
+				safe.RetryAfter = 0
+			}
+			return safe
+		}
+		return publicError(fallback, safeMessage(fallback), status, retryable, err)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return publicError(contract.ErrorTimeout, "request timed out", 504, true, err)

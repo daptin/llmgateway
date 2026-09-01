@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/daptin/llmgateway/catalog"
@@ -25,7 +26,7 @@ func TestHTTPGuardrailUsesFixedBoundedEndpoint(t *testing.T) {
 		_, _ = io.WriteString(response, `{"allowed":false,"reason":"policy"}`)
 	}))
 	defer server.Close()
-	checker, err := (HTTPFactory{}).Build(catalog.Guardrail{Config: json.RawMessage(`{"endpoint":"` + server.URL + `/check","allow_insecure":true}`)})
+	checker, err := (HTTPFactory{}).Build(catalog.Guardrail{Config: json.RawMessage(`{"endpoint":"` + server.URL + `/check","allow_insecure":true,"allow_private_network":true}`)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -39,10 +40,32 @@ func TestHTTPGuardrailRejectsUnsafeOrUnknownConfiguration(t *testing.T) {
 	for _, config := range []string{
 		`{"endpoint":"http://example.test/check"}`,
 		`{"endpoint":"https://user:password@example.test/check"}`,
+		`{"endpoint":"https://example.test/check?tenant=hidden"}`,
+		`{"endpoint":"http://127.0.0.1/check","allow_insecure":true}`,
 		`{"endpoint":"https://example.test/check","unknown":true}`,
 	} {
 		if _, err := (HTTPFactory{}).Build(catalog.Guardrail{Config: json.RawMessage(config)}); err == nil {
 			t.Fatalf("accepted unsafe config %s", config)
 		}
+	}
+}
+
+func TestHTTPGuardrailDoesNotFollowRedirects(t *testing.T) {
+	var followed atomic.Int64
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { followed.Add(1) }))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		http.Redirect(response, request, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer source.Close()
+	checker, err := (HTTPFactory{}).Build(catalog.Guardrail{Config: json.RawMessage(`{"endpoint":"` + source.URL + `","allow_insecure":true,"allow_private_network":true}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := checker.CheckInput(context.Background(), contract.Request{ID: "redirect", Operation: contract.OperationChat}); err == nil {
+		t.Fatal("guardrail redirect was accepted")
+	}
+	if followed.Load() != 0 {
+		t.Fatal("guardrail followed a redirect")
 	}
 }

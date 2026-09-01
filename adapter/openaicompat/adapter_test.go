@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -20,7 +19,14 @@ import (
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/compatibility"
 	"github.com/daptin/llmgateway/contract"
+	"github.com/daptin/llmgateway/internal/netpolicy"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
 
 func buildAdapter(t *testing.T, server *httptest.Server, parameters string, options Factory) *Adapter {
 	t.Helper()
@@ -114,14 +120,22 @@ func TestInvokeChatTranslatesCanonicalRequestAndResponse(t *testing.T) {
 			body["frequency_penalty"] != -0.5 || body["presence_penalty"] != 1.25 || body["parallel_tool_calls"] != false || body["reasoning_effort"] != "low" {
 			t.Fatalf("unexpected body: %#v", body)
 		}
+		messages := body["messages"].([]any)
+		content := messages[0].(map[string]any)["content"].([]any)
+		audio := content[1].(map[string]any)["input_audio"].(map[string]any)
+		if audio["data"] != "AAAA" || audio["format"] != "wav" {
+			t.Fatalf("input audio was not translated: %#v", content)
+		}
 		response.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(response, `{"id":"chatcmpl_1","created":123,"model":"actual-model","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"weather","arguments":"{\"city\":\"Pune\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"prompt_tokens_details":{"cached_tokens":2}}}`)
+		_, _ = io.WriteString(response, `{"id":"chatcmpl_1","created":123,"model":"actual-model","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"weather","arguments":"{\"city\":\"Pune\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14,"prompt_tokens_details":{"cached_tokens":2},"completion_tokens_details":{"reasoning_tokens":3}}}`)
 	}))
 	defer server.Close()
 	adapter := buildAdapter(t, server, `{"organization":"org"}`, Factory{})
 	frequency, presence, parallel := -0.5, 1.25, false
 	request := contract.Request{Operation: contract.OperationChat, Chat: &contract.ChatRequest{
-		Messages: []contract.Message{{Role: "user", Content: []contract.ContentPart{{Type: "text", Text: "weather"}}}}, MaxCompletionTokens: 20,
+		Messages: []contract.Message{{Role: "user", Content: []contract.ContentPart{
+			{Type: "text", Text: "weather"}, {Type: "input_audio", Audio: &contract.InputAudio{Data: "AAAA", Format: "wav"}},
+		}}}, MaxCompletionTokens: 20,
 		Tools:            []contract.Tool{{Type: "function", Function: contract.FunctionDefinition{Name: "weather", Parameters: json.RawMessage(`{"type":"object"}`)}}},
 		FrequencyPenalty: &frequency, PresencePenalty: &presence, ParallelToolCalls: &parallel, ReasoningEffort: "low",
 	}}
@@ -132,7 +146,7 @@ func TestInvokeChatTranslatesCanonicalRequestAndResponse(t *testing.T) {
 	if result.Chat == nil || result.Chat.ID != "chatcmpl_1" || result.Chat.Choices[0].Message.ToolCalls[0].Function.Name != "weather" {
 		t.Fatalf("unexpected canonical response: %#v", result)
 	}
-	if result.Usage.TotalTokens != 14 || result.Usage.CacheReadTokens != 2 {
+	if result.Usage.TotalTokens != 14 || result.Usage.CacheReadTokens != 2 || result.Usage.ReasoningTokens != 3 {
 		t.Fatalf("unexpected usage: %#v", result.Usage)
 	}
 }
@@ -165,15 +179,15 @@ func TestHealthCheckUsesAuthenticatedModelsEndpoint(t *testing.T) {
 
 func TestHealthCheckUsesValidatedDeploymentPathAndModel(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodGet || request.URL.Path != "/v1/health/probe-model" {
-			t.Fatalf("unexpected health request: %s %s", request.Method, request.URL.Path)
+		if request.Method != http.MethodGet || request.RequestURI != "/v1/health/openai%2Fgpt-4o" {
+			t.Fatalf("unexpected health request: %s %s", request.Method, request.RequestURI)
 		}
 		response.WriteHeader(http.StatusNoContent)
 	}))
 	defer server.Close()
 	built := buildAdapter(t, server, `{}`, Factory{})
 	configured := deployment()
-	configured.HealthCheck = catalog.HealthCheck{Enabled: true, Path: "/health/{model}", Model: "probe-model"}
+	configured.HealthCheck = catalog.HealthCheck{Enabled: true, Path: "/health/{model}", Model: "openai/gpt-4o"}
 	if err := built.ValidateDeployment(configured); err != nil {
 		t.Fatal(err)
 	}
@@ -219,6 +233,17 @@ func TestBuildUsesNamedProviderBaseURLsAndPreservesExplicitURL(t *testing.T) {
 		ID: "p", Name: "provider", Type: "openai-compatible", Enabled: true,
 	}, baseadapter.NewSecret([]byte("secret"))); err == nil {
 		t.Fatal("generic OpenAI-compatible provider accepted an empty base URL")
+	}
+	for _, invalid := range []string{
+		"https://user:password@gateway.example/v1",
+		"https://gateway.example/v1?tenant=hidden",
+		"https://gateway.example/v1#fragment",
+	} {
+		if _, err := (Factory{}).Build(context.Background(), catalog.Provider{
+			ID: "p", Name: "provider", Type: "openai-compatible", BaseURL: invalid, Enabled: true,
+		}, baseadapter.NewSecret([]byte("secret"))); err == nil {
+			t.Fatalf("accepted ambiguous provider base URL %q", invalid)
+		}
 	}
 }
 
@@ -326,16 +351,32 @@ func TestProviderRedirectsAreNotFollowed(t *testing.T) {
 	adapter := buildAdapter(t, server, `{}`, Factory{})
 	_, err := adapter.Invoke(context.Background(), deployment(), contract.Request{Operation: contract.OperationEmbeddings,
 		Embeddings: &contract.EmbeddingsRequest{Input: contract.EmbeddingInput{Texts: []string{"hi"}}}})
-	if err == nil || redirected.Load() != 0 {
+	var typed *contract.Error
+	if !errors.As(err, &typed) || typed.HTTPStatus != http.StatusBadGateway || typed.Retryable || redirected.Load() != 0 {
 		t.Fatalf("redirect error=%v followed=%d", err, redirected.Load())
 	}
 }
 
 func TestPrivateIPRejectsCarrierGradeNATAndMulticast(t *testing.T) {
 	for _, value := range []string{"100.64.0.1", "100.127.255.254", "224.0.0.1", "ff02::1"} {
-		if !privateIP(net.ParseIP(value)) {
+		if !netpolicy.PrivateHost(value) {
 			t.Fatalf("%s was not classified as private", value)
 		}
+	}
+}
+
+func TestCustomTransportRequiresExplicitPrivateNetworkOptIn(t *testing.T) {
+	provider := catalog.Provider{ID: "p", Name: "custom", Type: "openai-compatible", BaseURL: "https://example.test/v1", Enabled: true}
+	if _, err := (Factory{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("unused")
+	})}).Build(context.Background(), provider, baseadapter.NewSecret([]byte("key"))); err == nil {
+		t.Fatal("custom transport bypassed private-network enforcement without explicit opt-in")
+	}
+	provider.AllowPrivateNetwork = true
+	if _, err := (Factory{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+		return nil, errors.New("unused")
+	})}).Build(context.Background(), provider, baseadapter.NewSecret([]byte("key"))); err != nil {
+		t.Fatalf("explicit custom transport opt-in: %v", err)
 	}
 }
 
@@ -346,19 +387,113 @@ func TestRetryAfterSaturatesWithoutOverflow(t *testing.T) {
 }
 
 func TestProviderErrorsAreNormalizedAndSecretSafe(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
-		response.WriteHeader(http.StatusTooManyRequests)
-		_, _ = io.WriteString(response, `{"error":{"message":"raw provider secret detail"}}`)
+	tests := []struct {
+		name      string
+		status    int
+		code      contract.ErrorCode
+		retryable bool
+	}{
+		{name: "bad request", status: http.StatusBadRequest, code: contract.ErrorInvalidRequest},
+		{name: "authentication", status: http.StatusUnauthorized, code: contract.ErrorAuthentication},
+		{name: "permission", status: http.StatusForbidden, code: contract.ErrorPermission},
+		{name: "quota", status: http.StatusPaymentRequired, code: contract.ErrorInsufficientQuota},
+		{name: "model", status: http.StatusNotFound, code: contract.ErrorModelNotFound},
+		{name: "request timeout", status: http.StatusRequestTimeout, code: contract.ErrorTimeout, retryable: true},
+		{name: "conflict", status: http.StatusConflict, code: contract.ErrorProvider, retryable: true},
+		{name: "unprocessable", status: http.StatusUnprocessableEntity, code: contract.ErrorInvalidRequest},
+		{name: "rate limit", status: http.StatusTooManyRequests, code: contract.ErrorRateLimit, retryable: true},
+		{name: "gateway timeout", status: http.StatusGatewayTimeout, code: contract.ErrorTimeout, retryable: true},
+		{name: "provider failure", status: http.StatusBadGateway, code: contract.ErrorProvider, retryable: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+				response.Header().Set("Retry-After", "7")
+				response.WriteHeader(test.status)
+				_, _ = io.WriteString(response, `{"error":{"message":"raw provider secret detail"}}`)
+			}))
+			defer server.Close()
+			adapter := buildAdapter(t, server, `{}`, Factory{})
+			_, err := adapter.Invoke(context.Background(), deployment(), contract.Request{Operation: contract.OperationEmbeddings,
+				Embeddings: &contract.EmbeddingsRequest{Input: contract.EmbeddingInput{Texts: []string{"hi"}}}})
+			var typed *contract.Error
+			if !errors.As(err, &typed) || typed.Code != test.code || typed.HTTPStatus != test.status || typed.Retryable != test.retryable {
+				t.Fatalf("normalized error = %#v, want code=%s status=%d retryable=%v", err, test.code, test.status, test.retryable)
+			}
+			wantRetryAfter := time.Duration(0)
+			if test.retryable {
+				wantRetryAfter = 7 * time.Second
+			}
+			if typed.RetryAfter != wantRetryAfter {
+				t.Fatalf("retry-after = %s, want %s", typed.RetryAfter, wantRetryAfter)
+			}
+			if unwrapped := errors.Unwrap(typed); typed.Cause != nil || unwrapped != nil && strings.Contains(unwrapped.Error(), "raw provider") {
+				t.Fatalf("normalized error retained provider body data: %#v", typed)
+			}
+			safe := typed.Safe()
+			if safe.Cause != nil || strings.Contains(safe.Error(), "raw provider") || strings.Contains(safe.Error(), "secret-key") {
+				t.Fatalf("public error leaked provider data: %#v", safe)
+			}
+		})
+	}
+}
+
+func TestMalformedProviderResponsesFailExplicitly(t *testing.T) {
+	tests := []struct {
+		name      string
+		operation contract.Operation
+		payload   string
+	}{
+		{name: "chat missing choices", operation: contract.OperationChat, payload: `{"id":"chat"}`},
+		{name: "chat duplicate indices", operation: contract.OperationChat, payload: `{"id":"chat","choices":[{"index":0,"message":{"role":"assistant","content":"one"}},{"index":0,"message":{"role":"assistant","content":"two"}}]}`},
+		{name: "chat unsupported content", operation: contract.OperationChat, payload: `{"id":"chat","choices":[{"message":{"role":"assistant","content":{"text":"hidden"}}}]}`},
+		{name: "responses missing id", operation: contract.OperationResponses, payload: `{"status":"completed"}`},
+		{name: "responses missing status", operation: contract.OperationResponses, payload: `{"id":"resp","output":[]}`},
+		{name: "responses missing output", operation: contract.OperationResponses, payload: `{"id":"resp","status":"completed"}`},
+		{name: "embeddings missing data", operation: contract.OperationEmbeddings, payload: `{"data":[]}`},
+		{name: "embedding null value", operation: contract.OperationEmbeddings, payload: `{"data":[{"index":0,"embedding":null}]}`},
+		{name: "embedding empty vector", operation: contract.OperationEmbeddings, payload: `{"data":[{"index":0,"embedding":[]}]}`},
+		{name: "embedding empty base64", operation: contract.OperationEmbeddings, payload: `{"data":[{"index":0,"embedding":""}]}`},
+		{name: "embedding non-contiguous index", operation: contract.OperationEmbeddings, payload: `{"data":[{"index":1,"embedding":[0.1]}]}`},
+		{name: "image missing content", operation: contract.OperationImageGeneration, payload: `{"data":[{}]}`},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := decodeResponse(test.operation, []byte(test.payload))
+			var typed *contract.Error
+			if !errors.As(err, &typed) || typed.Code != contract.ErrorProvider || typed.HTTPStatus != http.StatusBadGateway || !typed.Retryable {
+				t.Fatalf("malformed response error = %#v", err)
+			}
+			if typed.Safe().Cause != nil {
+				t.Fatalf("safe malformed-response error retained cause: %#v", typed.Safe())
+			}
+		})
+	}
+}
+
+func TestProviderResponseCardinalityMustMatchRequest(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/v1/chat/completions":
+			_, _ = io.WriteString(response, `{"id":"chat","choices":[{"index":0,"message":{"role":"assistant","content":"one"}}],"usage":{"total_tokens":1}}`)
+		case "/v1/embeddings":
+			_, _ = io.WriteString(response, `{"data":[{"index":0,"embedding":[0.1]}],"usage":{"total_tokens":1}}`)
+		case "/v1/images/generations":
+			_, _ = io.WriteString(response, `{"data":[{"b64_json":"AAAA"}],"usage":{"total_tokens":1}}`)
+		}
 	}))
 	defer server.Close()
-	adapter := buildAdapter(t, server, `{}`, Factory{})
-	_, err := adapter.Invoke(context.Background(), deployment(), contract.Request{Operation: contract.OperationEmbeddings, Embeddings: &contract.EmbeddingsRequest{Input: contract.EmbeddingInput{Texts: []string{"hi"}}}})
-	var typed *contract.Error
-	if !errors.As(err, &typed) || typed.Code != contract.ErrorRateLimit || !typed.Retryable {
-		t.Fatalf("unexpected error: %#v", err)
+	upstream := buildAdapter(t, server, `{}`, Factory{})
+	requests := []contract.Request{
+		{Operation: contract.OperationChat, Chat: &contract.ChatRequest{N: 2, Messages: []contract.Message{{Role: "user", Content: []contract.ContentPart{{Type: "text", Text: "hi"}}}}}},
+		{Operation: contract.OperationEmbeddings, Embeddings: &contract.EmbeddingsRequest{Input: contract.EmbeddingInput{Texts: []string{"one", "two"}}, EncodingFormat: "float"}},
+		{Operation: contract.OperationImageGeneration, ImageGeneration: &contract.ImageGenerationRequest{Prompt: "circle", N: 2, ResponseFormat: "b64_json"}},
 	}
-	if strings.Contains(typed.Safe().Error(), "raw provider") || strings.Contains(typed.Safe().Error(), "secret-key") {
-		t.Fatalf("public error leaked provider data: %v", typed.Safe())
+	for _, request := range requests {
+		if _, err := upstream.Invoke(context.Background(), deployment(), request); err == nil {
+			t.Fatalf("%s response cardinality mismatch was accepted", request.Operation)
+		}
 	}
 }
 
@@ -433,6 +568,64 @@ func TestChatStreamPreservesToolDeltasUsageAndDone(t *testing.T) {
 	}
 }
 
+func TestChatStreamQueuesEveryChoiceFromOneFrame(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(response, "data: {\"id\":\"chat_n\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"one\"}},{\"index\":1,\"delta\":{\"content\":\"two\"}}],\"usage\":{\"total_tokens\":2}}\n\ndata: [DONE]\n\n")
+	}))
+	defer server.Close()
+	upstream := buildAdapter(t, server, `{}`, Factory{})
+	stream, err := upstream.Stream(context.Background(), deployment(), contract.Request{
+		Operation: contract.OperationChat, Stream: true,
+		Chat: &contract.ChatRequest{N: 2, Messages: []contract.Message{{Role: "user", Content: []contract.ContentPart{{Type: "text", Text: "hi"}}}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Close()
+	first, err := stream.Next(context.Background())
+	if err != nil || first.Chat == nil || first.Chat.Index != 0 || first.Usage != nil {
+		t.Fatalf("first=%#v err=%v", first, err)
+	}
+	second, err := stream.Next(context.Background())
+	if err != nil || second.Chat == nil || second.Chat.Index != 1 || second.Usage == nil || second.Usage.TotalTokens != 2 {
+		t.Fatalf("second=%#v err=%v", second, err)
+	}
+	done, err := stream.Next(context.Background())
+	if err != nil || !done.Terminal || done.Usage == nil || done.Usage.TotalTokens != 2 {
+		t.Fatalf("done=%#v err=%v", done, err)
+	}
+}
+
+func TestMalformedStreamEventsFailWithoutRetainingProviderPayload(t *testing.T) {
+	events, err := decodeChatEvents([]byte(`{"id":"chat","choices":[{"index":0,"delta":{"content":"one"}},{"index":1,"delta":{"content":"two"}}],"usage":{"total_tokens":2}}`))
+	if err != nil || len(events) != 2 || events[0].Chat.Index != 0 || events[1].Chat.Index != 1 || events[0].Usage != nil || events[1].Usage.TotalTokens != 2 {
+		t.Fatalf("multi-choice chat frame = %#v, %v", events, err)
+	}
+	for _, payload := range []string{
+		`{"choices":[{"index":0},{"index":0}]}`,
+		`{"choices":[{"index":-1}]}`,
+	} {
+		if _, err := decodeChatEvents([]byte(payload)); err == nil {
+			t.Fatalf("accepted invalid chat choice indices: %s", payload)
+		}
+	}
+	_, err = decodeResponsesEvent("error", []byte(`{"type":"error","error":{"message":"raw provider secret"}}`))
+	var typed *contract.Error
+	if !errors.As(err, &typed) || typed.Cause != nil || strings.Contains(typed.Error(), "raw provider") {
+		t.Fatalf("responses stream error retained provider payload: %#v", err)
+	}
+}
+
+func TestStreamEOFBeforeDoneIsNormalizedAsTransientProviderFailure(t *testing.T) {
+	stream := newEventStream(io.NopCloser(strings.NewReader("")), contract.OperationChat, 1024)
+	_, err := stream.Next(context.Background())
+	var typed *contract.Error
+	if !errors.As(err, &typed) || typed.Code != contract.ErrorProvider || typed.HTTPStatus != http.StatusBadGateway || !typed.Retryable {
+		t.Fatalf("premature stream EOF = %#v", err)
+	}
+}
+
 func TestRequestTimeoutCoversResponseBody(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
 		response.Header().Set("Content-Type", "application/json")
@@ -446,7 +639,32 @@ func TestRequestTimeoutCoversResponseBody(t *testing.T) {
 	deployment := deployment()
 	deployment.RequestTimeout = 10 * time.Millisecond
 	_, err := adapter.Invoke(context.Background(), deployment, contract.Request{Operation: contract.OperationEmbeddings, Embeddings: &contract.EmbeddingsRequest{Input: contract.EmbeddingInput{Texts: []string{"hi"}}}})
-	if err == nil {
-		t.Fatal("expected response-body timeout")
+	var typed *contract.Error
+	if !errors.As(err, &typed) || typed.Code != contract.ErrorTimeout || typed.HTTPStatus != http.StatusGatewayTimeout || !typed.Retryable {
+		t.Fatalf("response-body timeout = %#v, want retryable timeout error", err)
+	}
+}
+
+func TestRequestCancellationCoversResponseBody(t *testing.T) {
+	headersWritten := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "application/json")
+		response.WriteHeader(http.StatusOK)
+		response.(http.Flusher).Flush()
+		close(headersWritten)
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+	adapter := buildAdapter(t, server, `{}`, Factory{})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		<-headersWritten
+		cancel()
+	}()
+	_, err := adapter.Invoke(ctx, deployment(), contract.Request{Operation: contract.OperationEmbeddings,
+		Embeddings: &contract.EmbeddingsRequest{Input: contract.EmbeddingInput{Texts: []string{"hi"}}}})
+	var typed *contract.Error
+	if !errors.As(err, &typed) || typed.Code != contract.ErrorProvider || typed.HTTPStatus != 499 || typed.Retryable {
+		t.Fatalf("response-body cancellation = %#v, want non-retryable cancellation", err)
 	}
 }

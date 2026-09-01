@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
@@ -115,6 +116,18 @@ func perform(handler http.Handler, method, path, body, token string) *httptest.R
 	return response
 }
 
+func TestRetryAfterRoundingCannotOverflow(t *testing.T) {
+	engine := &fakeEngine{snapshot: testSnapshot(t), invokeErr: &contract.Error{
+		Code: contract.ErrorRateLimit, Message: "rate limited", HTTPStatus: http.StatusTooManyRequests,
+		Retryable: true, RetryAfter: time.Duration(1<<63 - 1),
+	}}
+	response := perform(testHandler(t, engine, fakeAuthenticator{}), http.MethodPost, "/v1/chat/completions",
+		`{"model":"allowed","messages":[{"role":"user","content":"hello"}]}`, "key")
+	if response.Code != http.StatusTooManyRequests || response.Header().Get("Retry-After") != "9223372037" {
+		t.Fatalf("status=%d retry-after=%q", response.Code, response.Header().Get("Retry-After"))
+	}
+}
+
 func decodeObject(t *testing.T, response *httptest.ResponseRecorder) map[string]any {
 	t.Helper()
 	var value map[string]any
@@ -147,6 +160,19 @@ func TestAuthenticationAndRoutingErrorsUseOpenAIShape(t *testing.T) {
 				t.Fatalf("not an OpenAI error response: %#v", value)
 			}
 		})
+	}
+}
+
+func TestMalformedTypedAuthenticationErrorFallsBackToInternalError(t *testing.T) {
+	engine := &fakeEngine{snapshot: testSnapshot(t)}
+	handler := testHandler(t, engine, fakeAuthenticator{err: &contract.Error{Code: "unsafe", Message: "secret", HTTPStatus: 0}})
+	response := perform(handler, http.MethodGet, "/v1/models", "", "token")
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("malformed authentication status=%d body=%s", response.Code, response.Body.String())
+	}
+	errorObject := decodeObject(t, response)["error"].(map[string]any)
+	if errorObject["code"] != string(contract.ErrorInternal) || strings.Contains(response.Body.String(), "secret") {
+		t.Fatalf("malformed authentication error leaked: %s", response.Body.String())
 	}
 }
 
@@ -241,7 +267,7 @@ func TestChatCanonicalizesTypedMultimodalToolsAndReturnsGoldenResponse(t *testin
 		Usage: contract.Usage{InputTokens: 9, OutputTokens: 4, TotalTokens: 13},
 	}}
 	handler := testHandler(t, engine, fakeAuthenticator{principal: contract.Principal{KeyID: "key-1"}})
-	body := `{"model":"allowed","messages":[{"role":"user","content":[{"type":"text","text":"weather"},{"type":"image_url","image_url":{"url":"https://example.test/map.png","detail":"low"}}]}],"tools":[{"type":"function","function":{"name":"weather","parameters":{"type":"object"},"strict":true}}],"tool_choice":{"type":"function","function":{"name":"weather"}},"response_format":{"type":"json_schema","json_schema":{"name":"forecast","schema":{"type":"object"},"strict":true}},"n":2,"temperature":0.2,"top_p":0.9,"frequency_penalty":-0.5,"presence_penalty":1.25,"stop":["done"],"user":"user-1","seed":7,"logprobs":true,"top_logprobs":3,"parallel_tool_calls":false,"reasoning_effort":"low","max_completion_tokens":32}`
+	body := `{"model":"allowed","messages":[{"role":"user","content":[{"type":"text","text":"weather"},{"type":"image_url","image_url":{"url":"https://example.test/map.png","detail":"low"}},{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}],"tools":[{"type":"function","function":{"name":"weather","parameters":{"type":"object"},"strict":true}}],"tool_choice":{"type":"function","function":{"name":"weather"}},"response_format":{"type":"json_schema","json_schema":{"name":"forecast","schema":{"type":"object"},"strict":true}},"n":2,"temperature":0.2,"top_p":0.9,"frequency_penalty":-0.5,"presence_penalty":1.25,"stop":["done"],"user":"user-1","seed":7,"logprobs":true,"top_logprobs":3,"parallel_tool_calls":false,"reasoning_effort":"low","max_completion_tokens":32}`
 	response := perform(handler, http.MethodPost, "/v1/chat/completions", body, "key")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -250,7 +276,8 @@ func TestChatCanonicalizesTypedMultimodalToolsAndReturnsGoldenResponse(t *testin
 	if request.Chat == nil || request.Operation != contract.OperationChat || request.Stream || request.MaxOutputTokens != 32 {
 		t.Fatalf("invalid canonical request: %#v", request)
 	}
-	if len(request.Chat.Messages[0].Content) != 2 || request.Chat.ToolChoice.FunctionName != "weather" || !*request.Chat.Tools[0].Function.Strict {
+	if len(request.Chat.Messages[0].Content) != 3 || request.Chat.Messages[0].Content[2].Audio == nil ||
+		request.Chat.Messages[0].Content[2].Audio.Format != "wav" || request.Chat.ToolChoice.FunctionName != "weather" || !*request.Chat.Tools[0].Function.Strict {
 		t.Fatalf("typed fields were not preserved: %#v", request.Chat)
 	}
 	if request.Chat.FrequencyPenalty == nil || *request.Chat.FrequencyPenalty != -0.5 || request.Chat.PresencePenalty == nil ||
@@ -339,6 +366,11 @@ func TestModelsUseEngineAuthorization(t *testing.T) {
 	models := value["data"].([]any)
 	if len(models) != 1 || models[0].(map[string]any)["id"] != "allowed" {
 		t.Fatalf("authorization was not applied: %#v", models)
+	}
+	visible := perform(handler, http.MethodGet, "/v1/models/allowed", "", "key")
+	visibleModel := decodeObject(t, visible)
+	if visible.Code != http.StatusOK || visibleModel["owned_by"] != "llmgateway" || visibleModel["llmgateway"] == nil || visibleModel["daptin"] != nil {
+		t.Fatalf("model metadata is not host-neutral: status=%d body=%#v", visible.Code, visibleModel)
 	}
 	denied := perform(handler, http.MethodGet, "/v1/models/denied", "", "key")
 	if denied.Code != http.StatusNotFound {

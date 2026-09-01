@@ -9,8 +9,10 @@ import (
 )
 
 type runtimeGuardrail struct {
-	configuration catalog.Guardrail
-	checker       guardrail.Checker
+	configuration     catalog.Guardrail
+	checker           guardrail.Checker
+	supportsStreaming bool
+	cacheStable       bool
 }
 
 func (e *Engine) checkInput(ctx context.Context, runtime *runtimeSnapshot, model catalog.Model, request contract.Request) error {
@@ -63,7 +65,7 @@ func (e *Engine) checkStream(ctx context.Context, prepared preparedRequest, even
 
 func validateStreamingGuardrails(runtime *runtimeSnapshot, model catalog.Model) error {
 	for _, bound := range runtime.guardrails[model.ID] {
-		if (bound.configuration.Phase == "output" || bound.configuration.Phase == "both") && !bound.checker.SupportsStreaming() {
+		if (bound.configuration.Phase == "output" || bound.configuration.Phase == "both") && !bound.supportsStreaming {
 			return publicError(contract.ErrorInvalidRequest, "streaming is incompatible with the model guardrails", 400, false, nil)
 		}
 	}
@@ -71,12 +73,17 @@ func validateStreamingGuardrails(runtime *runtimeSnapshot, model catalog.Model) 
 }
 
 func runGuardrail(ctx context.Context, configuration catalog.Guardrail, check func(context.Context) (guardrail.Decision, error)) (guardrail.Decision, error) {
+	protected := func(checkCtx context.Context) (guardrail.Decision, error) {
+		return callExtension("guardrail check", func() (guardrail.Decision, error) {
+			return check(checkCtx)
+		})
+	}
 	if configuration.Timeout <= 0 {
-		return check(ctx)
+		return protected(ctx)
 	}
 	checkCtx, cancel := context.WithTimeout(ctx, configuration.Timeout)
 	defer cancel()
-	return check(checkCtx)
+	return protected(checkCtx)
 }
 
 func guardrailOutcome(configuration catalog.Guardrail, decision guardrail.Decision, err error) error {
@@ -104,6 +111,6 @@ func (e *Engine) recordGuardrail(ctx context.Context, request contract.Request, 
 	}
 	e.telemetry.Record(ctx, TelemetryEvent{
 		Name: "guardrail", RequestID: request.ID,
-		Attributes: map[string]string{"guardrail_id": string(configuration.ID), "phase": phase, "outcome": outcome, "reason": decision.Reason},
+		Attributes: map[string]string{"guardrail_id": string(configuration.ID), "phase": phase, "outcome": outcome},
 	})
 }

@@ -39,8 +39,15 @@ type MeteringPort interface {
 }
 
 type CounterStore interface {
+	// Add atomically increments a disposable protection counter. The first
+	// successful increment establishes the TTL; later increments must not slide
+	// the window.
 	Add(context.Context, string, int64, time.Duration) (int64, error)
 	Get(context.Context, string) (int64, bool, error)
+	// Acquire atomically reserves one unit up to maximum and returns an opaque,
+	// idempotently releasable lease. The aggregate expiry must cover the newest
+	// lease so live capacity cannot disappear early; TTL bounds leaked capacity
+	// after a crash.
 	Acquire(context.Context, string, int64, time.Duration) (string, error)
 	Release(context.Context, string) error
 	Delete(context.Context, string) error

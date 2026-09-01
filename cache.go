@@ -15,7 +15,7 @@ const cacheFillPollInterval = 25 * time.Millisecond
 func (e *Engine) lookupCache(ctx context.Context, principal contract.Principal, prepared preparedRequest) (string, contract.Response, bool) {
 	stable := true
 	for _, bound := range prepared.runtime.guardrails[prepared.model.ID] {
-		if !bound.checker.CacheStable() {
+		if !bound.cacheStable {
 			stable = false
 			break
 		}

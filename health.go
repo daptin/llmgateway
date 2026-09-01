@@ -25,6 +25,10 @@ type probeTarget struct {
 // checks. Successful probes clear infrastructure circuit state but never clear
 // provider rate-limit cooldowns.
 func (e *Engine) Probe(ctx context.Context) (HealthReport, error) {
+	if !e.beginRequest() {
+		return HealthReport{}, ErrDraining
+	}
+	defer e.endRequest()
 	runtime, err := e.currentRuntime()
 	if err != nil {
 		return HealthReport{}, err
@@ -94,7 +98,9 @@ func (e *Engine) pruneHealthState(snapshot *catalog.Snapshot) {
 func (e *Engine) probeDeployment(parent context.Context, revision uint64, target probeTarget) bool {
 	defer e.completeHealthProbe(target.deployment.ID)
 	ctx, cancel := context.WithTimeout(parent, target.deployment.HealthCheck.Timeout)
-	err := target.checker.HealthCheck(ctx, target.deployment)
+	_, err := callExtension("adapter health check", func() (struct{}, error) {
+		return struct{}{}, target.checker.HealthCheck(ctx, target.deployment)
+	})
 	cancel()
 	outcome := "healthy"
 	if err == nil {

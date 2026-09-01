@@ -69,7 +69,7 @@ func encodeModel(model catalog.Model) map[string]any {
 	}
 	sort.Strings(operations)
 	return map[string]any{
-		"id": model.Name, "object": "model", "created": time.Unix(0, 0).Unix(), "owned_by": "daptin",
-		"daptin": map[string]any{"operations": operations, "capabilities": model.Capabilities},
+		"id": model.Name, "object": "model", "created": time.Unix(0, 0).Unix(), "owned_by": "llmgateway",
+		"llmgateway": map[string]any{"operations": operations, "capabilities": model.Capabilities},
 	}
 }

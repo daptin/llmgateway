@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,6 +17,7 @@ import (
 	"github.com/daptin/llmgateway/catalog"
 	"github.com/daptin/llmgateway/contract"
 	"github.com/daptin/llmgateway/internal/jsonx"
+	"github.com/daptin/llmgateway/internal/netpolicy"
 )
 
 const (
@@ -33,7 +33,6 @@ var providerBaseURLs = map[string]string{
 }
 
 type Factory struct {
-	Client           *http.Client
 	Transport        http.RoundTripper
 	MaxResponseBytes int64
 	MaxEventBytes    int
@@ -50,7 +49,6 @@ type Adapter struct {
 	baseURL          *url.URL
 	apiKey           []byte
 	parameters       providerParameters
-	client           *http.Client
 	transport        http.RoundTripper
 	maxResponseBytes int64
 	maxEventBytes    int
@@ -67,13 +65,13 @@ func (f Factory) Build(_ context.Context, provider catalog.Provider, secret adap
 		baseURL = providerBaseURLs[provider.Type]
 	}
 	parsed, err := url.Parse(baseURL)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, errors.New("OpenAI-compatible provider requires a valid base URL")
 	}
 	if parsed.Scheme != "https" && !(parsed.Scheme == "http" && provider.AllowInsecure) {
 		return nil, errors.New("OpenAI-compatible provider requires HTTPS unless insecure HTTP is explicit")
 	}
-	if !provider.AllowPrivateNetwork && privateHost(parsed.Hostname()) {
+	if !provider.AllowPrivateNetwork && netpolicy.PrivateHost(parsed.Hostname()) {
 		return nil, errors.New("OpenAI-compatible provider private-network access requires explicit opt-in")
 	}
 	parameters := providerParameters{}
@@ -107,14 +105,11 @@ func (f Factory) Build(_ context.Context, provider catalog.Provider, secret adap
 	if transport == nil {
 		transport = http.DefaultTransport.(*http.Transport).Clone()
 	}
-	client := f.Client
-	if client != nil {
-		copy := *client
-		copy.CheckRedirect = rejectRedirect
-		client = &copy
+	if _, enforceable := transport.(*http.Transport); !enforceable && !provider.AllowPrivateNetwork {
+		return nil, errors.New("custom OpenAI-compatible transport requires explicit private-network opt-in")
 	}
 	return &Adapter{
-		baseURL: parsed, apiKey: key, parameters: parameters, client: client, transport: transport,
+		baseURL: parsed, apiKey: key, parameters: parameters, transport: transport,
 		maxResponseBytes: maximum, maxEventBytes: frameMaximum, now: f.Now, allowPrivate: provider.AllowPrivateNetwork,
 		clients: make(map[time.Duration]*http.Client),
 	}, nil
@@ -167,7 +162,26 @@ func (a *Adapter) Invoke(ctx context.Context, deployment catalog.Deployment, req
 	if err != nil {
 		return contract.Response{}, providerFailure("upstream response exceeded the configured bound", err)
 	}
-	return decodeResponse(request.Operation, payload)
+	decoded, err := decodeResponse(request.Operation, payload)
+	if err != nil {
+		return contract.Response{}, err
+	}
+	switch request.Operation {
+	case contract.OperationChat:
+		if request.Chat.N > 0 && len(decoded.Chat.Choices) != request.Chat.N {
+			return contract.Response{}, providerFailure("upstream returned the wrong number of chat choices", nil)
+		}
+	case contract.OperationEmbeddings:
+		expected := len(request.Embeddings.Input.Texts) + len(request.Embeddings.Input.Tokens)
+		if len(decoded.Embeddings.Data) != expected {
+			return contract.Response{}, providerFailure("upstream returned the wrong number of embeddings", nil)
+		}
+	case contract.OperationImageGeneration:
+		if request.ImageGeneration.N > 0 && len(decoded.ImageGeneration.Data) != request.ImageGeneration.N {
+			return contract.Response{}, providerFailure("upstream returned the wrong number of images", nil)
+		}
+	}
+	return decoded, nil
 }
 
 func (a *Adapter) Stream(ctx context.Context, deployment catalog.Deployment, request contract.Request) (adapter.Stream, error) {
@@ -195,16 +209,25 @@ func (a *Adapter) Stream(ctx context.Context, deployment catalog.Deployment, req
 
 func (a *Adapter) HealthCheck(ctx context.Context, deployment catalog.Deployment) error {
 	endpoint := *a.baseURL
-	path := deployment.HealthCheck.Path
+	basePath := strings.TrimRight(endpoint.Path, "/")
+	baseRawPath := strings.TrimRight(endpoint.EscapedPath(), "/")
+	path, rawPath := deployment.HealthCheck.Path, ""
 	if path == "" {
-		path = "/models"
+		path, rawPath = "/models", "/models"
 		if deployment.HealthCheck.Model != "" {
-			path += "/" + url.PathEscape(deployment.HealthCheck.Model)
+			path += "/" + deployment.HealthCheck.Model
+			rawPath += "/" + url.PathEscape(deployment.HealthCheck.Model)
 		}
-	} else if deployment.HealthCheck.Model != "" {
-		path = strings.ReplaceAll(path, "{model}", url.PathEscape(deployment.HealthCheck.Model))
+	} else {
+		parsed, _ := url.Parse(path) // ValidateDeployment has already accepted this path.
+		path, rawPath = parsed.Path, parsed.EscapedPath()
+		if deployment.HealthCheck.Model != "" {
+			path = strings.ReplaceAll(path, "{model}", deployment.HealthCheck.Model)
+			rawPath = strings.ReplaceAll(rawPath, "%7Bmodel%7D", url.PathEscape(deployment.HealthCheck.Model))
+		}
 	}
-	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
+	endpoint.Path = basePath + path
+	endpoint.RawPath = baseRawPath + rawPath
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
 	if err != nil {
 		return providerFailure("failed to construct upstream health probe", err)
@@ -285,9 +308,6 @@ func (c *cancelReadCloser) Close() error {
 }
 
 func (a *Adapter) clientFor(connectTimeout time.Duration) *http.Client {
-	if a.client != nil {
-		return a.client
-	}
 	a.clientsMu.Lock()
 	defer a.clientsMu.Unlock()
 	if client := a.clients[connectTimeout]; client != nil {
@@ -295,8 +315,7 @@ func (a *Adapter) clientFor(connectTimeout time.Duration) *http.Client {
 	}
 	transport := a.transport
 	if base, ok := a.transport.(*http.Transport); ok {
-		clone := base.Clone()
-		clone.DialContext = safeDialContext(connectTimeout, a.allowPrivate)
+		clone := netpolicy.CloneTransport(base, connectTimeout, a.allowPrivate)
 		if connectTimeout > 0 {
 			clone.TLSHandshakeTimeout = connectTimeout
 			clone.ResponseHeaderTimeout = connectTimeout
@@ -304,7 +323,7 @@ func (a *Adapter) clientFor(connectTimeout time.Duration) *http.Client {
 		transport = clone
 		a.ownedTransports = append(a.ownedTransports, clone)
 	}
-	client := &http.Client{Transport: transport, CheckRedirect: rejectRedirect}
+	client := &http.Client{Transport: transport, CheckRedirect: netpolicy.RejectRedirect}
 	a.clients[connectTimeout] = client
 	return client
 }
@@ -318,57 +337,6 @@ func (a *Adapter) CloseIdleConnections() {
 	for _, transport := range transports {
 		transport.CloseIdleConnections()
 	}
-}
-
-func rejectRedirect(_ *http.Request, _ []*http.Request) error {
-	return http.ErrUseLastResponse
-}
-
-func safeDialContext(timeout time.Duration, allowPrivate bool) func(context.Context, string, string) (net.Conn, error) {
-	dialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		if allowPrivate {
-			return dialer.DialContext(ctx, network, address)
-		}
-		host, port, err := net.SplitHostPort(address)
-		if err != nil {
-			return nil, errors.New("upstream address is invalid")
-		}
-		addresses, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-		if err != nil {
-			return nil, err
-		}
-		for _, candidate := range addresses {
-			if privateIP(candidate.IP) {
-				continue
-			}
-			connection, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.IP.String(), port))
-			if dialErr == nil {
-				return connection, nil
-			}
-			err = dialErr
-		}
-		if err != nil {
-			return nil, err
-		}
-		return nil, errors.New("upstream resolved only to private-network addresses")
-	}
-}
-
-func privateHost(host string) bool {
-	if strings.EqualFold(host, "localhost") {
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return privateIP(ip)
-	}
-	return false
-}
-
-func privateIP(ip net.IP) bool {
-	carrierGradeNAT := len(ip) > 0 && ip.To4() != nil && ip.To4()[0] == 100 && ip.To4()[1]&0xc0 == 0x40
-	return !ip.IsGlobalUnicast() || ip.IsPrivate() || ip.IsLoopback() || ip.IsUnspecified() ||
-		ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || carrierGradeNAT
 }
 
 func readBounded(reader io.Reader, maximum int64) ([]byte, error) {

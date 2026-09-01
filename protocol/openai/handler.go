@@ -175,8 +175,14 @@ func writeError(response http.ResponseWriter, err error, id contract.ID) {
 	if errors.As(err, &typed) {
 		public = typed.Safe()
 	}
-	if public.RetryAfter > 0 {
-		seconds := int64((public.RetryAfter + time.Second - 1) / time.Second)
+	if public == nil || !public.Code.Valid() || public.Message == "" || public.HTTPStatus < 400 || public.HTTPStatus > 599 {
+		public = gatewayError(contract.ErrorInternal, "internal server error", http.StatusInternalServerError, false, nil)
+	}
+	if public.Retryable && public.RetryAfter > 0 {
+		seconds := int64(public.RetryAfter / time.Second)
+		if public.RetryAfter%time.Second != 0 {
+			seconds++
+		}
 		response.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
 	}
 	response.Header().Set("Content-Type", "application/json")
