@@ -56,18 +56,16 @@ type Options struct {
 }
 
 type runtimeSnapshot struct {
-	catalog    *catalog.Snapshot
-	adapters   map[contract.ID]adapter.Adapter
-	guardrails map[contract.ID][]runtimeGuardrail
-	closeOnce  sync.Once
+	catalog      *catalog.Snapshot
+	adapters     map[contract.ID]adapter.Adapter
+	capabilities map[contract.ID]adapter.Capabilities
+	guardrails   map[contract.ID][]runtimeGuardrail
+	closeOnce    sync.Once
 }
 
 func (r *runtimeSnapshot) Capabilities(providerID contract.ID) (adapter.Capabilities, bool) {
-	value, ok := r.adapters[providerID]
-	if !ok {
-		return adapter.Capabilities{}, false
-	}
-	return value.Capabilities(), true
+	value, ok := r.capabilities[providerID]
+	return value, ok
 }
 
 func (r *runtimeSnapshot) closeIdleConnections() {
@@ -250,7 +248,10 @@ func (e *Engine) Reload(ctx context.Context) error {
 		e.recordReloadFailure(document.Revision, "validate")
 		return err
 	}
-	candidate := &runtimeSnapshot{catalog: compiled, adapters: make(map[contract.ID]adapter.Adapter)}
+	candidate := &runtimeSnapshot{
+		catalog: compiled, adapters: make(map[contract.ID]adapter.Adapter),
+		capabilities: make(map[contract.ID]adapter.Capabilities),
+	}
 	installed := false
 	defer func() {
 		if !installed {
@@ -291,6 +292,16 @@ func (e *Engine) Reload(ctx context.Context) error {
 			return fmt.Errorf("provider %q adapter factory returned nil", provider.ID)
 		}
 		candidate.adapters[provider.ID] = instance
+		declared := instance.Capabilities()
+		operations := make(map[contract.Operation]bool, len(declared.Operations))
+		for operation, supported := range declared.Operations {
+			operations[operation] = supported
+		}
+		features := make(map[string]bool, len(declared.Features))
+		for feature, supported := range declared.Features {
+			features[feature] = supported
+		}
+		candidate.capabilities[provider.ID] = adapter.Capabilities{Operations: operations, Features: features}
 	}
 	for _, deployment := range compiled.Deployments() {
 		if !deployment.Enabled {

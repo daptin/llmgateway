@@ -48,3 +48,24 @@ monetary budgets.
 
 Provider URLs are HTTPS-only by default. Insecure HTTP and access to loopback,
 link-local, or private networks require separate explicit provider opt-ins.
+
+## Measured gateway-core baseline
+
+Measured on 2026-09-01 with Go 1.25.0 on an Apple M1 Max (`darwin/arm64`):
+
+```text
+go test . -run '^$' -bench '^BenchmarkEngineInvoke$' -benchmem -benchtime=2s -count=5
+
+serial:   4.63-5.16 us/op, 7,600 B/op, 55 allocs/op
+parallel: 3.29-3.38 us/op, 7,488 B/op, 54 allocs/op
+```
+
+This benchmark covers the reusable engine's catalog lookup, request validation,
+authorization port, route construction, metering port lifecycle, deployment
+protection, adapter invocation, usage settlement, telemetry construction, and
+terminalization. Its host ports and provider are deterministic in-memory test
+implementations. It deliberately excludes HTTP/JSON encoding, network latency,
+Olric, Daptin transactions, and durable metering, so it is an engine-regression
+baseline rather than an end-to-end capacity claim. The Linux/PostgreSQL
+qualification target above remains pending until it is measured on that
+reference topology.

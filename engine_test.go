@@ -78,6 +78,16 @@ type closeTrackingAdapter struct {
 	closes        atomic.Int64
 }
 
+type capabilityCountingAdapter struct {
+	adapter.Adapter
+	calls atomic.Int64
+}
+
+func (instance *capabilityCountingAdapter) Capabilities() adapter.Capabilities {
+	instance.calls.Add(1)
+	return instance.Adapter.Capabilities()
+}
+
 func (adapter *closeTrackingAdapter) ValidateDeployment(catalog.Deployment) error {
 	return adapter.validationErr
 }
@@ -143,6 +153,46 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 		t.Fatalf("expected ErrDraining, got %v", err)
 	}
 	assertReadyStatus(t, handler, http.StatusServiceUnavailable)
+}
+
+func TestAdapterCapabilitiesAreSnapshottedAtReload(t *testing.T) {
+	provider := &capabilityCountingAdapter{Adapter: testkit.NewFaultAdapter(
+		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		testkit.AdapterStep{Response: contract.Response{
+			Chat: &contract.ChatResponse{ID: "first"}, Usage: contract.Usage{InputTokens: 1, TotalTokens: 1},
+		}},
+		testkit.AdapterStep{Response: contract.Response{
+			Chat: &contract.ChatResponse{ID: "second"}, Usage: contract.Usage{InputTokens: 1, TotalTokens: 1},
+		}},
+	)}
+	registry := adapter.NewRegistry()
+	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) {
+		return provider, nil
+	})); err != nil {
+		t.Fatal(err)
+	}
+	clock := testkit.NewAutoClock(time.Now())
+	engine, err := llmgateway.New(llmgateway.Dependencies{
+		Catalog: testkit.NewCatalogSource(testDocument()), Adapters: registry,
+		Authorizer: testkit.AllowAuthorizer{}, Metering: testkit.NewMeteringRecorder(),
+		Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{},
+		Guardrails: guardrail.NewRegistry(), Telemetry: llmgateway.DiscardTelemetrySink{},
+		Selector: testkit.NewSelector(0), Clock: clock,
+	}, llmgateway.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	for _, requestID := range []string{"first", "second"} {
+		if _, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, chatRequest(requestID, false)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls := provider.calls.Load(); calls != 1 {
+		t.Fatalf("adapter Capabilities calls = %d, want one call during reload", calls)
+	}
 }
 
 func TestDrainBeforeFirstReloadIsIdempotent(t *testing.T) {
