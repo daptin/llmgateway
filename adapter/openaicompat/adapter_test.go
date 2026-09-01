@@ -137,6 +137,18 @@ func TestInvokeChatTranslatesCanonicalRequestAndResponse(t *testing.T) {
 	}
 }
 
+func TestEncodeMessagesOmitsEmptyImageDetail(t *testing.T) {
+	encoded := encodeMessages([]contract.Message{{Role: "user", Content: []contract.ContentPart{
+		{Type: "text", Text: "describe"},
+		{Type: "image_url", ImageURL: &contract.ImageURL{URL: "data:image/png;base64,AAAA"}},
+	}}})
+	parts := encoded[0]["content"].([]map[string]any)
+	image := parts[1]["image_url"].(map[string]any)
+	if _, exists := image["detail"]; exists {
+		t.Fatalf("empty optional image detail was encoded: %#v", image)
+	}
+}
+
 func TestHealthCheckUsesAuthenticatedModelsEndpoint(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodGet || request.URL.Path != "/v1/models" || request.Header.Get("Authorization") != "Bearer secret-key" {

@@ -183,7 +183,11 @@ func encodeMessages(messages []contract.Message) []map[string]any {
 				case "text":
 					encoded["text"] = part.Text
 				case "image_url":
-					encoded["image_url"] = map[string]any{"url": part.ImageURL.URL, "detail": part.ImageURL.Detail}
+					image := map[string]any{"url": part.ImageURL.URL}
+					if part.ImageURL.Detail != "" {
+						image["detail"] = part.ImageURL.Detail
+					}
+					encoded["image_url"] = image
 				case "input_audio":
 					encoded["input_audio"] = map[string]any{"data": part.Audio.Data, "format": part.Audio.Format}
 				}
