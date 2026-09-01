@@ -623,6 +623,9 @@ func assertReadyStatus(t *testing.T, handler http.Handler, expected int) {
 	if response.Code != expected {
 		t.Fatalf("ready status = %d, body = %s", response.Code, response.Body.String())
 	}
+	if !strings.Contains(response.Body.String(), `"active_snapshot_age_seconds":`) {
+		t.Fatalf("ready status omitted active snapshot age: %s", response.Body.String())
+	}
 }
 
 func TestEngineRetriesOnlyRetryableFailure(t *testing.T) {
@@ -707,7 +710,7 @@ func TestRejectedNewerCatalogDegradesReadinessWithoutReplacingSnapshot(t *testin
 	if err := registry.Register("test", adapter.FactoryFunc(func(context.Context, catalog.Provider, adapter.Secret) (adapter.Adapter, error) { return provider, nil })); err != nil {
 		t.Fatal(err)
 	}
-	clock := testkit.NewAutoClock(time.Now())
+	clock := testkit.NewClock(time.Now())
 	engine, err := llmgateway.New(llmgateway.Dependencies{
 		Catalog: source, Adapters: registry, Authorizer: testkit.AllowAuthorizer{}, Metering: testkit.NewMeteringRecorder(),
 		Counters: testkit.NewCounterStore(clock.Now), Cache: llmgateway.DisabledResponseCache{}, Guardrails: guardrail.NewRegistry(),
@@ -719,6 +722,7 @@ func TestRejectedNewerCatalogDegradesReadinessWithoutReplacingSnapshot(t *testin
 	if err := engine.Reload(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	clock.Advance(3 * time.Second)
 	invalid := testDocument()
 	invalid.Revision = 2
 	invalid.Models[0].Name = ""
@@ -727,7 +731,7 @@ func TestRejectedNewerCatalogDegradesReadinessWithoutReplacingSnapshot(t *testin
 		t.Fatal("expected invalid catalog rejection")
 	}
 	status := engine.Status()
-	if status.Revision != 1 || status.RejectedRevision != 2 || !status.Degraded || !status.Ready {
+	if status.Revision != 1 || status.ActiveSnapshotAgeSeconds != 3 || status.RejectedRevision != 2 || !status.Degraded || !status.Ready {
 		t.Fatalf("status = %+v", status)
 	}
 	snapshot, err := engine.Snapshot()

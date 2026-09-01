@@ -105,6 +105,8 @@ func (e *Engine) probeDeployment(parent context.Context, revision uint64, target
 	outcome := "healthy"
 	if err == nil {
 		e.recordHealthSuccess(parent, target.deployment)
+	} else if parent.Err() != nil {
+		outcome = "cancelled"
 	} else {
 		outcome = "unhealthy"
 		e.recordHealthFailure(parent, target.deployment)

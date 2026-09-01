@@ -60,6 +60,7 @@ type runtimeSnapshot struct {
 	adapters     map[contract.ID]adapter.Adapter
 	capabilities map[contract.ID]adapter.Capabilities
 	guardrails   map[contract.ID][]runtimeGuardrail
+	activatedAt  time.Time
 	closeOnce    sync.Once
 }
 
@@ -380,6 +381,7 @@ func (e *Engine) Reload(ctx context.Context) error {
 		e.activeMu.Unlock()
 		return ErrDraining
 	}
+	candidate.activatedAt = e.clock.Now()
 	previous := e.snapshot.Swap(candidate)
 	installed = true
 	if previous != nil {
@@ -405,12 +407,13 @@ func (e *Engine) Reload(ctx context.Context) error {
 // readiness. Failure stages are stable categories and never contain host or
 // provider error text.
 type Status struct {
-	Ready            bool   `json:"ready"`
-	Draining         bool   `json:"draining"`
-	Degraded         bool   `json:"degraded"`
-	Revision         uint64 `json:"revision"`
-	RejectedRevision uint64 `json:"rejected_revision,omitempty"`
-	ReloadStage      string `json:"reload_stage,omitempty"`
+	Ready                    bool   `json:"ready"`
+	Draining                 bool   `json:"draining"`
+	Degraded                 bool   `json:"degraded"`
+	Revision                 uint64 `json:"revision"`
+	ActiveSnapshotAgeSeconds int64  `json:"active_snapshot_age_seconds"`
+	RejectedRevision         uint64 `json:"rejected_revision,omitempty"`
+	ReloadStage              string `json:"reload_stage,omitempty"`
 }
 
 func (e *Engine) Status() Status {
@@ -418,6 +421,9 @@ func (e *Engine) Status() Status {
 	if current := e.snapshot.Load(); current != nil {
 		status.Revision = current.catalog.Revision()
 		status.Ready = !status.Draining
+		if age := e.clock.Now().Sub(current.activatedAt); age > 0 {
+			status.ActiveSnapshotAgeSeconds = int64(age / time.Second)
+		}
 	}
 	e.statusMu.RLock()
 	status.RejectedRevision = e.rejectedRevision

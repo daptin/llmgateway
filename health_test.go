@@ -186,6 +186,35 @@ func TestDrainWaitsForHealthProbeBeforeClosingSnapshot(t *testing.T) {
 	}
 }
 
+func TestCancelledProbeDoesNotOpenInfrastructureCircuit(t *testing.T) {
+	started := make(chan struct{}, 1)
+	fault := testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
+		testkit.AdapterStep{Response: contract.Response{Usage: contract.Usage{TotalTokens: 1}}})
+	provider := &healthAdapter{FaultAdapter: fault, healthStart: started, healthWait: make(chan struct{})}
+	engine := healthEngine(t, provider, testkit.NewCounterStore(time.Now), llmgateway.Options{}, catalog.HealthCheck{Enabled: true, FailureThreshold: 1})
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, err := engine.Probe(ctx)
+		result <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("health probe did not start")
+	}
+	cancel()
+	if err := <-result; !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled probe = %v, want context cancellation", err)
+	}
+	if _, err := engine.Invoke(context.Background(), contract.Principal{}, chatRequest("after-cancelled-probe", false)); err != nil {
+		t.Fatalf("lifecycle cancellation poisoned deployment health: %v", err)
+	}
+}
+
 func TestProbeHonorsPerDeploymentInterval(t *testing.T) {
 	document := testDocument()
 	document.Deployments[0].HealthCheck = catalog.HealthCheck{Enabled: true, Interval: time.Minute}
