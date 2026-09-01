@@ -9,7 +9,7 @@ import (
 )
 
 func TestCostMicrosRoundsEachComponentUp(t *testing.T) {
-	cost, err := CostMicros(contract.Usage{InputTokens: 1, OutputTokens: 1}, catalog.Pricing{InputMicrosPerMillion: 1, OutputMicrosPerMillion: 1})
+	cost, err := CostMicros(contract.Usage{InputTokens: 1, OutputTokens: 1}, catalog.Pricing{Rates: map[string]int64{"input_tokens": 1, "output_tokens": 1}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -19,7 +19,7 @@ func TestCostMicrosRoundsEachComponentUp(t *testing.T) {
 }
 
 func TestCostMicrosRejectsOverflow(t *testing.T) {
-	_, err := CostMicros(contract.Usage{InputTokens: math.MaxInt64}, catalog.Pricing{InputMicrosPerMillion: math.MaxInt64})
+	_, err := CostMicros(contract.Usage{InputTokens: math.MaxInt64}, catalog.Pricing{Rates: map[string]int64{"input_tokens": math.MaxInt64}})
 	if err != ErrCostOverflow {
 		t.Fatalf("expected ErrCostOverflow, got %v", err)
 	}
@@ -34,11 +34,10 @@ func FuzzCostMicrosMatchesUnsignedReference(f *testing.F) {
 			InputTokens: int64(inputTokens), OutputTokens: int64(outputTokens), CacheReadTokens: int64(cacheReadTokens),
 			CacheWriteTokens: int64(cacheWriteTokens), ReasoningTokens: int64(reasoningTokens),
 		}
-		pricing := catalog.Pricing{
-			InputMicrosPerMillion: int64(inputRate), OutputMicrosPerMillion: int64(outputRate),
-			CacheReadMicrosPerMillion: int64(cacheReadRate), CacheWriteMicrosPerMillion: int64(cacheWriteRate),
-			ReasoningMicrosPerMillion: int64(reasoningRate),
-		}
+		pricing := catalog.Pricing{Rates: map[string]int64{
+			"input_tokens": int64(inputRate), "output_tokens": int64(outputRate), "cache_read_tokens": int64(cacheReadRate),
+			"cache_write_tokens": int64(cacheWriteRate), "reasoning_tokens": int64(reasoningRate),
+		}}
 		cost, err := CostMicros(usage, pricing)
 		if err != nil {
 			t.Fatal(err)
@@ -58,4 +57,17 @@ func FuzzCostMicrosMatchesUnsignedReference(f *testing.F) {
 			t.Fatalf("cost=%d want=%d usage=%+v pricing=%+v", cost, expected, usage, pricing)
 		}
 	})
+}
+
+func TestCostMicrosPricesSupplementalMeasures(t *testing.T) {
+	cost, err := CostMicros(
+		contract.Usage{Measures: map[string]int64{"ocr_pages": 2}},
+		catalog.Pricing{Rates: map[string]int64{"ocr_pages": 500_000}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cost != 1 {
+		t.Fatalf("cost=%d want=1", cost)
+	}
 }

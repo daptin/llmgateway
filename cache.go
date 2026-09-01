@@ -132,13 +132,40 @@ func validCachedResponse(operation contract.Operation, response contract.Respons
 	if !response.Usage.Valid() {
 		return false
 	}
+	payloads := []bool{response.Chat != nil, response.TextCompletion != nil, response.Responses != nil, response.Embeddings != nil,
+		response.Images != nil, response.Moderation != nil, response.Rerank != nil, response.AudioSpeech != nil, response.Transcription != nil, response.Search != nil, response.OCR != nil}
+	count := 0
+	for _, present := range payloads {
+		if present {
+			count++
+		}
+	}
+	if count != 1 {
+		return false
+	}
 	switch operation {
 	case contract.OperationChat:
-		return response.Chat != nil && response.Responses == nil && response.Embeddings == nil && response.ImageGeneration == nil
+		return response.Chat != nil
+	case contract.OperationTextCompletion:
+		return response.TextCompletion != nil
 	case contract.OperationResponses:
-		return response.Chat == nil && response.Responses != nil && response.Embeddings == nil && response.ImageGeneration == nil
+		return response.Responses != nil
 	case contract.OperationEmbeddings:
-		return response.Chat == nil && response.Responses == nil && response.Embeddings != nil && response.ImageGeneration == nil
+		return response.Embeddings != nil
+	case contract.OperationImageGeneration, contract.OperationImageEdit, contract.OperationImageVariation:
+		return response.Images != nil
+	case contract.OperationModeration:
+		return response.Moderation != nil
+	case contract.OperationRerank:
+		return response.Rerank != nil
+	case contract.OperationAudioSpeech:
+		return response.AudioSpeech != nil
+	case contract.OperationTranscription, contract.OperationTranslation:
+		return response.Transcription != nil
+	case contract.OperationSearch:
+		return response.Search != nil
+	case contract.OperationOCR:
+		return response.OCR != nil
 	default:
 		return false
 	}

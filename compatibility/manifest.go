@@ -13,20 +13,20 @@ import (
 type Support string
 
 const (
-	Native      Support = "native"
-	Translated  Support = "translated"
-	Passthrough Support = "passthrough"
-	Rejected    Support = "rejected"
+	Native     Support = "native"
+	Translated Support = "translated"
+	Rejected   Support = "rejected"
 )
 
 type Manifest struct {
-	Version         string             `json:"version"`
-	Kind            string             `json:"kind"`
-	Comparison      Comparison         `json:"comparison"`
-	Endpoints       []Endpoint         `json:"endpoints"`
-	Providers       []Provider         `json:"providers"`
-	ErrorCodes      []string           `json:"error_codes"`
-	StreamingEvents map[string]Support `json:"streaming_events"`
+	Version         string                `json:"version"`
+	Kind            string                `json:"kind"`
+	Comparison      Comparison            `json:"comparison"`
+	Endpoints       []Endpoint            `json:"endpoints"`
+	Unsupported     []UnsupportedEndpoint `json:"unsupported_endpoints"`
+	Providers       []Provider            `json:"providers"`
+	ErrorCodes      []string              `json:"error_codes"`
+	StreamingEvents map[string]Support    `json:"streaming_events"`
 }
 
 type Comparison struct {
@@ -39,6 +39,12 @@ type Endpoint struct {
 	Path           string             `json:"path"`
 	RequestFields  map[string]Support `json:"request_fields"`
 	ResponseFields map[string]Support `json:"response_fields"`
+}
+
+type UnsupportedEndpoint struct {
+	Method string `json:"method"`
+	Path   string `json:"path"`
+	Reason string `json:"reason"`
 }
 
 type Provider struct {
@@ -95,6 +101,16 @@ func (m Manifest) Validate() error {
 			}
 		}
 	}
+	for _, endpoint := range m.Unsupported {
+		key := strings.ToUpper(endpoint.Method) + " " + endpoint.Path
+		if endpoint.Method == "" || !strings.HasPrefix(endpoint.Path, "/") || strings.TrimSpace(endpoint.Reason) == "" {
+			return fmt.Errorf("invalid unsupported endpoint %q", key)
+		}
+		if _, exists := endpoints[key]; exists {
+			return fmt.Errorf("duplicate endpoint %q", key)
+		}
+		endpoints[key] = struct{}{}
+	}
 	providers := make(map[string]struct{}, len(m.Providers))
 	for _, provider := range m.Providers {
 		if strings.TrimSpace(provider.Name) == "" {
@@ -120,7 +136,7 @@ func (m Manifest) Validate() error {
 
 func validSupport(value Support) bool {
 	switch value {
-	case Native, Translated, Passthrough, Rejected:
+	case Native, Translated, Rejected:
 		return true
 	default:
 		return false

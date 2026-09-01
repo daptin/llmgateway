@@ -9,16 +9,29 @@ import (
 	"github.com/daptin/llmgateway/compatibility"
 )
 
-func TestCompatibilityManifestDeclaresEveryAcceptedTopLevelRequestField(t *testing.T) {
+func TestCompatibilityManifestDeclaresEveryAcceptedJSONRequestField(t *testing.T) {
 	manifest, err := compatibility.Default()
 	if err != nil {
 		t.Fatal(err)
 	}
 	wires := map[string]reflect.Type{
 		"POST /v1/chat/completions":   reflect.TypeOf(chatRequest{}),
+		"POST /v1/completions":        reflect.TypeOf(completionRequest{}),
+		"POST /v1/messages":           reflect.TypeOf(messagesRequest{}),
 		"POST /v1/responses":          reflect.TypeOf(responsesRequest{}),
+		"POST /v1/responses/compact":  reflect.TypeOf(compactResponsesRequest{}),
 		"POST /v1/embeddings":         reflect.TypeOf(embeddingsRequest{}),
 		"POST /v1/images/generations": reflect.TypeOf(imageRequest{}),
+		"POST /v1/moderations":        reflect.TypeOf(moderationRequest{}),
+		"POST /v1/rerank":             reflect.TypeOf(rerankRequest{}),
+		"POST /rerank":                reflect.TypeOf(rerankRequest{}),
+		"POST /v2/rerank":             reflect.TypeOf(rerankRequest{}),
+		"POST /v1/audio/speech":       reflect.TypeOf(speechRequest{}),
+		"POST /v1/batches":            reflect.TypeOf(batchRequest{}),
+		"POST /v1/search":             reflect.TypeOf(searchRequest{}),
+		"POST /v1/search/{tool}":      reflect.TypeOf(searchRequest{}),
+		"POST /v1/ocr":                reflect.TypeOf(ocrRequest{}),
+		"POST /ocr":                   reflect.TypeOf(ocrRequest{}),
 	}
 	for endpoint, wire := range wires {
 		fields := make(map[string]compatibility.Support)
@@ -31,7 +44,7 @@ func TestCompatibilityManifestDeclaresEveryAcceptedTopLevelRequestField(t *testi
 		if fields == nil {
 			t.Fatalf("manifest is missing %s", endpoint)
 		}
-		accepted := requestFieldNames(wire)
+		accepted := requestFieldNames(endpoint, wire)
 		declared := make([]string, 0, len(fields))
 		for field := range fields {
 			declared = append(declared, field)
@@ -43,7 +56,7 @@ func TestCompatibilityManifestDeclaresEveryAcceptedTopLevelRequestField(t *testi
 	}
 }
 
-func requestFieldNames(wire reflect.Type) []string {
+func requestFieldNames(endpoint string, wire reflect.Type) []string {
 	fields := make([]string, 0, wire.NumField())
 	for index := 0; index < wire.NumField(); index++ {
 		name := strings.Split(wire.Field(index).Tag.Get("json"), ",")[0]
@@ -53,7 +66,17 @@ func requestFieldNames(wire reflect.Type) []string {
 		case "text":
 			name = "text.format"
 		case "reasoning":
-			name = "reasoning.effort"
+			fields = append(fields, "reasoning.effort", "reasoning.summary")
+			continue
+		case "metadata":
+			if endpoint == "POST /v1/messages" {
+				name = "metadata.user_id"
+			}
+		case "output_expires_after":
+			if endpoint == "POST /v1/batches" {
+				fields = append(fields, "output_expires_after.anchor", "output_expires_after.seconds")
+				continue
+			}
 		}
 		fields = append(fields, name)
 	}

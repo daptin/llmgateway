@@ -11,9 +11,24 @@ import (
 
 type modelDefaults struct {
 	Chat            chatDefaults            `json:"chat,omitempty"`
+	TextCompletion  textCompletionDefaults  `json:"text_completion,omitempty"`
 	Responses       responsesDefaults       `json:"responses,omitempty"`
 	Embeddings      embeddingsDefaults      `json:"embeddings,omitempty"`
 	ImageGeneration imageGenerationDefaults `json:"image_generation,omitempty"`
+}
+
+type textCompletionDefaults struct {
+	BestOf           *int     `json:"best_of,omitempty"`
+	Echo             *bool    `json:"echo,omitempty"`
+	FrequencyPenalty *float64 `json:"frequency_penalty,omitempty"`
+	MaxTokens        *int64   `json:"max_tokens,omitempty"`
+	N                *int     `json:"n,omitempty"`
+	PresencePenalty  *float64 `json:"presence_penalty,omitempty"`
+	Seed             *int64   `json:"seed,omitempty"`
+	Stop             []string `json:"stop,omitempty"`
+	Suffix           *string  `json:"suffix,omitempty"`
+	Temperature      *float64 `json:"temperature,omitempty"`
+	TopP             *float64 `json:"top_p,omitempty"`
 }
 
 type chatDefaults struct {
@@ -63,7 +78,8 @@ func parseModelDefaults(model Model) (modelDefaults, error) {
 	}
 	for operation, present := range map[contract.Operation]bool{
 		contract.OperationChat: defaults.Chat.present(), contract.OperationResponses: defaults.Responses.present(),
-		contract.OperationEmbeddings: defaults.Embeddings.present(), contract.OperationImageGeneration: defaults.ImageGeneration.present(),
+		contract.OperationTextCompletion: defaults.TextCompletion.present(),
+		contract.OperationEmbeddings:     defaults.Embeddings.present(), contract.OperationImageGeneration: defaults.ImageGeneration.present(),
 	} {
 		if present && !supportsOperation(model.Operations, operation) {
 			return modelDefaults{}, fmt.Errorf("model %q configures defaults for undeclared operation %q", model.ID, operation)
@@ -73,7 +89,8 @@ func parseModelDefaults(model Model) (modelDefaults, error) {
 		return modelDefaults{}, fmt.Errorf("model %q embedding dimensions default requires the dimensions capability", model.ID)
 	}
 	for capability, configured := range map[string]bool{
-		"penalties":      defaults.Chat.FrequencyPenalty != nil || defaults.Chat.PresencePenalty != nil,
+		"penalties": defaults.Chat.FrequencyPenalty != nil || defaults.Chat.PresencePenalty != nil ||
+			defaults.TextCompletion.FrequencyPenalty != nil || defaults.TextCompletion.PresencePenalty != nil,
 		"parallel_tools": defaults.Chat.ParallelToolCalls != nil || defaults.Responses.ParallelToolCalls != nil,
 		"reasoning":      defaults.Chat.ReasoningEffort != nil || defaults.Responses.ReasoningEffort != nil,
 	} {
@@ -110,6 +127,26 @@ func (d modelDefaults) validate() error {
 			return errors.New("chat stop defaults cannot be empty")
 		}
 	}
+	if (d.TextCompletion.N != nil && (*d.TextCompletion.N < 1 || *d.TextCompletion.N > 128)) ||
+		(d.TextCompletion.BestOf != nil && (*d.TextCompletion.BestOf < 1 || *d.TextCompletion.BestOf > 128)) ||
+		(d.TextCompletion.MaxTokens != nil && *d.TextCompletion.MaxTokens < 1) {
+		return errors.New("text completion choice and token defaults are out of range")
+	}
+	if d.TextCompletion.N != nil && d.TextCompletion.BestOf != nil && *d.TextCompletion.BestOf < *d.TextCompletion.N {
+		return errors.New("text completion best_of default cannot be less than n")
+	}
+	if !validDefaultRange(d.TextCompletion.Temperature, 0, 2) || !validDefaultRange(d.TextCompletion.TopP, 0, 1) ||
+		!validDefaultRange(d.TextCompletion.FrequencyPenalty, -2, 2) || !validDefaultRange(d.TextCompletion.PresencePenalty, -2, 2) {
+		return errors.New("text completion sampling defaults are out of range")
+	}
+	if d.TextCompletion.Stop != nil && (len(d.TextCompletion.Stop) == 0 || len(d.TextCompletion.Stop) > 4) {
+		return errors.New("text completion stop default supports at most four values")
+	}
+	for _, stop := range d.TextCompletion.Stop {
+		if stop == "" {
+			return errors.New("text completion stop defaults cannot be empty")
+		}
+	}
 	if (d.Responses.MaxOutputTokens != nil && *d.Responses.MaxOutputTokens < 1) || (d.Embeddings.Dimensions != nil && *d.Embeddings.Dimensions < 1) {
 		return errors.New("response token and embedding dimension defaults cannot be negative")
 	}
@@ -138,6 +175,10 @@ func (d modelDefaults) validate() error {
 func (d chatDefaults) present() bool {
 	return d.N != nil || d.Temperature != nil || d.TopP != nil || d.FrequencyPenalty != nil || d.PresencePenalty != nil ||
 		d.MaxCompletionTokens != nil || d.Stop != nil || d.Seed != nil || d.ParallelToolCalls != nil || d.ReasoningEffort != nil
+}
+func (d textCompletionDefaults) present() bool {
+	return d.BestOf != nil || d.Echo != nil || d.FrequencyPenalty != nil || d.MaxTokens != nil || d.N != nil ||
+		d.PresencePenalty != nil || d.Seed != nil || d.Stop != nil || d.Suffix != nil || d.Temperature != nil || d.TopP != nil
 }
 func (d responsesDefaults) present() bool {
 	return d.MaxOutputTokens != nil || d.Temperature != nil || d.TopP != nil || d.ParallelToolCalls != nil || d.ReasoningEffort != nil
@@ -214,6 +255,60 @@ func (s *Snapshot) ApplyDefaults(modelID contract.ID, request contract.Request, 
 			request.Chat.ReasoningEffort = *defaults.Chat.ReasoningEffort
 		}
 		request.MaxOutputTokens = request.Chat.MaxCompletionTokens
+	case contract.OperationTextCompletion:
+		if request.TextCompletion == nil {
+			return request, nil
+		}
+		completion := *request.TextCompletion
+		request.TextCompletion = &completion
+		if completion.N == 0 {
+			if defaults.TextCompletion.N != nil {
+				request.TextCompletion.N = *defaults.TextCompletion.N
+			} else {
+				request.TextCompletion.N = 1
+			}
+		}
+		if request.TextCompletion.BestOf == 0 {
+			if defaults.TextCompletion.BestOf != nil {
+				request.TextCompletion.BestOf = *defaults.TextCompletion.BestOf
+			} else {
+				request.TextCompletion.BestOf = request.TextCompletion.N
+			}
+		}
+		if request.TextCompletion.MaxTokens == 0 {
+			if defaults.TextCompletion.MaxTokens != nil {
+				request.TextCompletion.MaxTokens = *defaults.TextCompletion.MaxTokens
+			} else {
+				request.TextCompletion.MaxTokens = defaultMaxOutputTokens
+			}
+		}
+		if request.TextCompletion.Temperature == nil {
+			request.TextCompletion.Temperature = cloneFloat(defaults.TextCompletion.Temperature)
+		}
+		if request.TextCompletion.TopP == nil {
+			request.TextCompletion.TopP = cloneFloat(defaults.TextCompletion.TopP)
+		}
+		if request.TextCompletion.FrequencyPenalty == nil {
+			request.TextCompletion.FrequencyPenalty = cloneFloat(defaults.TextCompletion.FrequencyPenalty)
+		}
+		if request.TextCompletion.PresencePenalty == nil {
+			request.TextCompletion.PresencePenalty = cloneFloat(defaults.TextCompletion.PresencePenalty)
+		}
+		if len(request.TextCompletion.Stop) == 0 && len(defaults.TextCompletion.Stop) != 0 {
+			request.TextCompletion.Stop = append([]string(nil), defaults.TextCompletion.Stop...)
+		}
+		if request.TextCompletion.Seed == nil && defaults.TextCompletion.Seed != nil {
+			seed := *defaults.TextCompletion.Seed
+			request.TextCompletion.Seed = &seed
+		}
+		if request.TextCompletion.Echo == nil && defaults.TextCompletion.Echo != nil {
+			echo := *defaults.TextCompletion.Echo
+			request.TextCompletion.Echo = &echo
+		}
+		if request.TextCompletion.Suffix == "" && defaults.TextCompletion.Suffix != nil {
+			request.TextCompletion.Suffix = *defaults.TextCompletion.Suffix
+		}
+		request.MaxOutputTokens = request.TextCompletion.MaxTokens
 	case contract.OperationResponses:
 		if request.MaxOutputTokens == 0 {
 			if defaults.Responses.MaxOutputTokens != nil {
@@ -282,6 +377,48 @@ func (s *Snapshot) ApplyDefaults(modelID contract.ID, request contract.Request, 
 			} else {
 				request.ImageGeneration.ResponseFormat = "url"
 			}
+		}
+	case contract.OperationImageEdit:
+		if request.ImageEdit == nil {
+			return request, nil
+		}
+		edit := *request.ImageEdit
+		request.ImageEdit = &edit
+		if edit.N == 0 {
+			request.ImageEdit.N = 1
+		}
+		if edit.ResponseFormat == "" {
+			request.ImageEdit.ResponseFormat = "url"
+		}
+	case contract.OperationImageVariation:
+		if request.ImageVariation == nil {
+			return request, nil
+		}
+		variation := *request.ImageVariation
+		request.ImageVariation = &variation
+		if variation.N == 0 {
+			request.ImageVariation.N = 1
+		}
+		if variation.ResponseFormat == "" {
+			request.ImageVariation.ResponseFormat = "url"
+		}
+	case contract.OperationRerank:
+		if request.Rerank != nil && request.Rerank.TopN == 0 {
+			rerank := *request.Rerank
+			rerank.TopN = len(rerank.Documents)
+			request.Rerank = &rerank
+		}
+	case contract.OperationAudioSpeech:
+		if request.AudioSpeech != nil && request.AudioSpeech.ResponseFormat == "" {
+			speech := *request.AudioSpeech
+			speech.ResponseFormat = "mp3"
+			request.AudioSpeech = &speech
+		}
+	case contract.OperationTranscription, contract.OperationTranslation:
+		if request.Transcription != nil && request.Transcription.ResponseFormat == "" {
+			transcription := *request.Transcription
+			transcription.ResponseFormat = "json"
+			request.Transcription = &transcription
 		}
 	}
 	return request, nil

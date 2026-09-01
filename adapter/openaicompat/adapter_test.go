@@ -24,6 +24,12 @@ import (
 
 type roundTripFunc func(*http.Request) (*http.Response, error)
 
+func deploymentWithParameters(parameters string) catalog.Deployment {
+	value := deployment()
+	value.Parameters = json.RawMessage(parameters)
+	return value
+}
+
 func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return function(request)
 }
@@ -117,7 +123,8 @@ func TestInvokeChatTranslatesCanonicalRequestAndResponse(t *testing.T) {
 			t.Fatal(err)
 		}
 		if body["model"] != "upstream-model" || body["max_completion_tokens"] != float64(20) || body["stream"] != false ||
-			body["frequency_penalty"] != -0.5 || body["presence_penalty"] != 1.25 || body["parallel_tool_calls"] != false || body["reasoning_effort"] != "low" {
+			body["frequency_penalty"] != -0.5 || body["presence_penalty"] != 1.25 || body["parallel_tool_calls"] != false || body["reasoning_effort"] != "low" ||
+			body["store"] != false || body["prompt_cache_key"] != "tenant-conversation" {
 			t.Fatalf("unexpected body: %#v", body)
 		}
 		messages := body["messages"].([]any)
@@ -131,13 +138,14 @@ func TestInvokeChatTranslatesCanonicalRequestAndResponse(t *testing.T) {
 	}))
 	defer server.Close()
 	adapter := buildAdapter(t, server, `{"organization":"org"}`, Factory{})
-	frequency, presence, parallel := -0.5, 1.25, false
+	frequency, presence, parallel, store := -0.5, 1.25, false, false
 	request := contract.Request{Operation: contract.OperationChat, Chat: &contract.ChatRequest{
 		Messages: []contract.Message{{Role: "user", Content: []contract.ContentPart{
 			{Type: "text", Text: "weather"}, {Type: "input_audio", Audio: &contract.InputAudio{Data: "AAAA", Format: "wav"}},
 		}}}, MaxCompletionTokens: 20,
 		Tools:            []contract.Tool{{Type: "function", Function: contract.FunctionDefinition{Name: "weather", Parameters: json.RawMessage(`{"type":"object"}`)}}},
 		FrequencyPenalty: &frequency, PresencePenalty: &presence, ParallelToolCalls: &parallel, ReasoningEffort: "low",
+		Store: &store, PromptCacheKey: "tenant-conversation",
 	}}
 	result, err := adapter.Invoke(context.Background(), deployment(), request)
 	if err != nil {
@@ -148,6 +156,78 @@ func TestInvokeChatTranslatesCanonicalRequestAndResponse(t *testing.T) {
 	}
 	if result.Usage.TotalTokens != 14 || result.Usage.CacheReadTokens != 2 || result.Usage.ReasoningTokens != 3 {
 		t.Fatalf("unexpected usage: %#v", result.Usage)
+	}
+}
+
+func TestInvokeTextCompletionUsesNativeUpstreamContract(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/completions" {
+			t.Fatalf("path=%s", request.URL.Path)
+		}
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		if body["model"] != "upstream-model" || body["prompt"] != "hello" || body["max_tokens"] != float64(4) ||
+			body["n"] != float64(1) || body["echo"] != false || body["logprobs"] != float64(2) {
+			t.Fatalf("body=%#v", body)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(response, `{"id":"cmpl_1","created":10,"model":"actual","choices":[{"text":" world","index":0,"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+	}))
+	defer server.Close()
+	echo, logprobs := false, 2
+	result, err := buildAdapter(t, server, `{}`, Factory{}).Invoke(context.Background(), deployment(), contract.Request{
+		Operation: contract.OperationTextCompletion, TextCompletion: &contract.TextCompletionRequest{
+			Prompt: contract.CompletionPrompt{Texts: []string{"hello"}}, MaxTokens: 4, N: 1, BestOf: 1, Echo: &echo, Logprobs: &logprobs,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.TextCompletion == nil || result.TextCompletion.ID != "cmpl_1" || result.TextCompletion.Choices[0].Text != " world" || result.Usage.TotalTokens != 2 {
+		t.Fatalf("result=%#v", result)
+	}
+}
+
+func TestInvokeModerationAndRerankUseCanonicalUpstreamContracts(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		switch request.URL.Path {
+		case "/v1/moderations":
+			if body["model"] != "upstream-model" || body["input"] != "inspect" {
+				t.Fatalf("moderation body=%#v", body)
+			}
+			_, _ = io.WriteString(response, `{"id":"modr_1","model":"actual","results":[{"flagged":false,"categories":{"violence":false},"category_scores":{"violence":0.01}}]}`)
+		case "/v1/rerank":
+			if body["model"] != "upstream-model" || body["query"] != "best" || body["top_n"] != float64(1) || len(body["documents"].([]any)) != 2 {
+				t.Fatalf("rerank body=%#v", body)
+			}
+			_, _ = io.WriteString(response, `{"id":"rerank_1","results":[{"index":1,"relevance_score":0.9,"document":{"text":"two"}}],"meta":{"billed_units":{"search_units":1},"tokens":{"input_tokens":4,"output_tokens":0}}}`)
+		default:
+			t.Fatalf("path=%s", request.URL.Path)
+		}
+	}))
+	defer server.Close()
+	built := buildAdapter(t, server, `{}`, Factory{})
+	moderation, err := built.Invoke(context.Background(), deployment(), contract.Request{Operation: contract.OperationModeration,
+		Moderation: &contract.ModerationRequest{Input: []contract.ModerationInput{{Type: "text", Text: "inspect"}}}})
+	if err != nil || moderation.Moderation == nil || len(moderation.Moderation.Results) != 1 {
+		t.Fatalf("moderation=%#v err=%v", moderation, err)
+	}
+	returnDocuments := true
+	reranked, err := built.Invoke(context.Background(), deployment(), contract.Request{Operation: contract.OperationRerank,
+		Rerank: &contract.RerankRequest{Query: "best", Documents: []contract.RerankDocument{{Text: "one"}, {Text: "two"}}, TopN: 1, ReturnDocuments: &returnDocuments}})
+	if err != nil || reranked.Rerank == nil || len(reranked.Rerank.Results) != 1 || reranked.Rerank.Results[0].Index != 1 || reranked.Usage.InputTokens != 4 || reranked.Usage.Measures["search_units"] != 1 {
+		t.Fatalf("rerank=%#v err=%v", reranked, err)
+	}
+	openRouter, err := decodeResponse(contract.OperationRerank, []byte(`{"id":"rerank_2","results":[{"index":0,"relevance_score":0.8,"document":{"text":"one"}}],"usage":{"search_units":2,"total_tokens":7}}`))
+	if err != nil || openRouter.Rerank == nil || openRouter.Rerank.Meta.SearchUnits != 2 || openRouter.Usage.TotalTokens != 7 || openRouter.Usage.Measures["search_units"] != 2 {
+		t.Fatalf("OpenRouter rerank=%#v err=%v", openRouter, err)
 	}
 }
 
@@ -273,6 +353,7 @@ func TestDeploymentParametersAddOnlyOperationScopedExtensionFields(t *testing.T)
 	for _, raw := range []string{
 		`{"unknown":{}}`,
 		`{"chat":{"model":"shadow-model"}}`,
+		`{"image_variation":{"image":"shadow-image"}}`,
 	} {
 		configured.Parameters = json.RawMessage(raw)
 		if err := built.ValidateDeployment(configured); err == nil {
@@ -295,10 +376,17 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 				t.Fatalf("Responses tool was not flat: %#v", tool)
 			}
 			reasoning := body["reasoning"].(map[string]any)
-			if body["temperature"] != 0.4 || body["top_p"] != 0.8 || body["parallel_tool_calls"] != false || reasoning["effort"] != "low" {
+			if body["temperature"] != 0.4 || body["top_p"] != 0.8 || body["parallel_tool_calls"] != false || reasoning["effort"] != "low" || reasoning["summary"] != "concise" ||
+				body["prompt_cache_key"] != "tenant-thread" || body["safety_identifier"] != "safe-user" || body["service_tier"] != "priority" ||
+				body["truncation"] != "disabled" || body["user"] != "legacy-user" || body["top_logprobs"] != float64(3) || body["store"] != false {
 				t.Fatalf("Responses controls were not preserved: %#v", body)
 			}
-			_, _ = io.WriteString(response, `{"id":"resp_1","model":"m","status":"completed","output":[{"type":"reasoning","id":"reason_1","status":"completed","summary":[{"type":"summary_text","text":"brief"}]},{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`)
+			content := body["input"].([]any)[0].(map[string]any)["content"].([]any)
+			file := content[1].(map[string]any)
+			if file["type"] != "input_file" || file["filename"] != "brief.pdf" || file["file_data"] != "data:application/pdf;base64,cGRm" {
+				t.Fatalf("Responses inline file was not preserved: %#v", content)
+			}
+			_, _ = io.WriteString(response, `{"id":"resp_1","model":"m","status":"completed","output":[{"type":"reasoning","id":"reason_1","summary":[{"type":"summary_text","text":"brief"}],"content":[{"type":"reasoning_text","text":"worked"}]},{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`)
 		case "/v1/embeddings":
 			_, _ = io.WriteString(response, `{"model":"m","data":[{"index":0,"embedding":[0.1,0.2]}],"usage":{"prompt_tokens":2,"total_tokens":2}}`)
 		case "/v1/images":
@@ -310,19 +398,30 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 	defer server.Close()
 	adapter := buildAdapter(t, server, `{"image_generation_path":"/images"}`, Factory{})
 	temperature, topP, parallel := 0.4, 0.8, false
+	topLogprobs := 3
 	tests := []struct {
 		name    string
 		request contract.Request
 		check   func(contract.Response) bool
 	}{
-		{name: "responses", request: contract.Request{Operation: contract.OperationResponses, Responses: &contract.ResponsesRequest{Input: []contract.ResponseInputItem{{Type: "message", Role: "user", Content: []contract.ContentPart{{Type: "input_text", Text: "hi"}}}}, Tools: []contract.Tool{{Type: "function", Function: contract.FunctionDefinition{Name: "weather", Parameters: json.RawMessage(`{"type":"object"}`)}}}, Temperature: &temperature, TopP: &topP, ParallelToolCalls: &parallel, ReasoningEffort: "low"}}, check: func(value contract.Response) bool {
-			return value.Responses != nil && value.Responses.Output[0].Summary[0].Text == "brief" && value.Responses.Output[1].Content[0].Text == "hello"
+		{name: "responses", request: contract.Request{Operation: contract.OperationResponses, Responses: &contract.ResponsesRequest{
+			Input: []contract.ResponseInputItem{{Type: "message", Role: "user", Content: []contract.ContentPart{
+				{Type: "input_text", Text: "hi"},
+				{Type: "input_file", File: &contract.InputFile{Data: "data:application/pdf;base64,cGRm", Filename: "brief.pdf"}},
+			}}},
+			Tools:       []contract.Tool{{Type: "function", Function: contract.FunctionDefinition{Name: "weather", Parameters: json.RawMessage(`{"type":"object"}`)}}},
+			Temperature: &temperature, TopP: &topP, ParallelToolCalls: &parallel, ReasoningEffort: "low", ReasoningSummary: "concise",
+			PromptCacheKey: "tenant-thread", SafetyIdentifier: "safe-user", ServiceTier: "priority", Truncation: "disabled",
+			User: "legacy-user", TopLogprobs: &topLogprobs,
+		}}, check: func(value contract.Response) bool {
+			return value.Responses != nil && value.Responses.Output[0].Status == "" && value.Responses.Output[0].Summary[0].Text == "brief" &&
+				value.Responses.Output[0].Content[0].Text == "worked" && value.Responses.Output[1].Content[0].Text == "hello"
 		}},
 		{name: "embeddings", request: contract.Request{Operation: contract.OperationEmbeddings, Embeddings: &contract.EmbeddingsRequest{Input: contract.EmbeddingInput{Texts: []string{"hi"}}, EncodingFormat: "float"}}, check: func(value contract.Response) bool {
 			return value.Embeddings != nil && len(value.Embeddings.Data[0].Vector) == 2
 		}},
 		{name: "images", request: contract.Request{Operation: contract.OperationImageGeneration, ImageGeneration: &contract.ImageGenerationRequest{Prompt: "cat", N: 1, ResponseFormat: "b64_json"}}, check: func(value contract.Response) bool {
-			return value.ImageGeneration != nil && value.ImageGeneration.Data[0].Base64 == "AAAA" && value.Usage.TotalTokens == 10
+			return value.Images != nil && value.Images.Data[0].Base64 == "AAAA" && value.Usage.TotalTokens == 10
 		}},
 	}
 	for _, test := range tests {
@@ -335,6 +434,42 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 				t.Fatalf("unexpected result: %#v", result)
 			}
 		})
+	}
+}
+
+func TestInvokeSupportsResponseCompaction(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/responses/compact" {
+			http.NotFound(response, request)
+			return
+		}
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			t.Fatal(err)
+		}
+		options, ok := body["prompt_cache_options"].(map[string]any)
+		input, inputOK := body["input"].([]any)
+		if !ok || options["mode"] != "explicit" || options["ttl"] != "30m" || body["prompt_cache_retention"] != "24h" ||
+			!inputOK || input[1].(map[string]any)["encrypted_content"] != "previous" {
+			t.Fatalf("compaction request was not preserved: %#v", body)
+		}
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(response, `{"id":"resp_compact_1","object":"response.compaction","created_at":123,"output":[{"type":"message","id":"msg_1","role":"user","content":[{"type":"input_text","text":"hello"},{"type":"input_image","image_url":"https://example.test/image.png","detail":"low"}]},{"type":"compaction","id":"cmp_1","encrypted_content":"opaque","created_by":"service"}],"usage":{"input_tokens":9,"output_tokens":2,"total_tokens":11}}`)
+	}))
+	defer server.Close()
+	adapter := buildAdapter(t, server, `{}`, Factory{})
+	result, err := adapter.Invoke(context.Background(), deployment(), contract.Request{Operation: contract.OperationResponseCompact,
+		Responses: &contract.ResponsesRequest{Input: []contract.ResponseInputItem{
+			{Type: "message", Role: "user", Content: []contract.ContentPart{{Type: "input_text", Text: "hello"}}},
+			{Type: "compaction", EncryptedContent: "previous"},
+		}, PromptCacheMode: "explicit", PromptCacheTTL: "30m", PromptCacheRetention: "24h"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Responses == nil || result.Responses.Object != "response.compaction" || result.Responses.Output[0].Role != "user" ||
+		result.Responses.Output[0].Content[1].ImageURL == nil || result.Responses.Output[0].Content[1].ImageURL.Detail != "low" ||
+		result.Responses.Output[1].EncryptedContent != "opaque" || result.Usage.TotalTokens != 11 {
+		t.Fatalf("compaction response = %#v", result)
 	}
 }
 
@@ -450,6 +585,9 @@ func TestMalformedProviderResponsesFailExplicitly(t *testing.T) {
 		{name: "responses missing id", operation: contract.OperationResponses, payload: `{"status":"completed"}`},
 		{name: "responses missing status", operation: contract.OperationResponses, payload: `{"id":"resp","output":[]}`},
 		{name: "responses missing output", operation: contract.OperationResponses, payload: `{"id":"resp","status":"completed"}`},
+		{name: "compaction wrong object", operation: contract.OperationResponseCompact, payload: `{"id":"resp","object":"response","created_at":1,"output":[]}`},
+		{name: "compaction missing creation time", operation: contract.OperationResponseCompact, payload: `{"id":"resp","object":"response.compaction","output":[]}`},
+		{name: "compaction missing encrypted content", operation: contract.OperationResponseCompact, payload: `{"id":"resp","object":"response.compaction","created_at":1,"output":[{"type":"compaction","id":"cmp"}]}`},
 		{name: "embeddings missing data", operation: contract.OperationEmbeddings, payload: `{"data":[]}`},
 		{name: "embedding null value", operation: contract.OperationEmbeddings, payload: `{"data":[{"index":0,"embedding":null}]}`},
 		{name: "embedding empty vector", operation: contract.OperationEmbeddings, payload: `{"data":[{"index":0,"embedding":[]}]}`},
@@ -610,10 +748,91 @@ func TestMalformedStreamEventsFailWithoutRetainingProviderPayload(t *testing.T) 
 			t.Fatalf("accepted invalid chat choice indices: %s", payload)
 		}
 	}
-	_, err = decodeResponsesEvent("error", []byte(`{"type":"error","error":{"message":"raw provider secret"}}`))
+	_, err = decodeResponsesEvent("error", []byte(`{"type":"error","sequence_number":1,"error":{"message":"raw provider secret"}}`))
 	var typed *contract.Error
 	if !errors.As(err, &typed) || typed.Cause != nil || strings.Contains(typed.Error(), "raw provider") {
 		t.Fatalf("responses stream error retained provider payload: %#v", err)
+	}
+	for _, test := range []struct {
+		name    string
+		payload string
+	}{
+		{name: "unknown type", payload: `{"type":"response.vendor.delta","sequence_number":1}`},
+		{name: "conflicting type", payload: `{"type":"response.output_text.done","sequence_number":1,"item_id":"msg","output_index":0,"content_index":0}`},
+		{name: "missing coordinates", payload: `{"type":"response.output_text.delta","sequence_number":1,"delta":"secret"}`},
+		{name: "unsupported item", payload: `{"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"id":"item","type":"computer_call","status":"in_progress"}}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			name := ""
+			if test.name == "conflicting type" {
+				name = "response.output_text.delta"
+			}
+			if _, decodeErr := decodeResponsesEvent(name, []byte(test.payload)); decodeErr == nil {
+				t.Fatalf("accepted malformed Responses event: %s", test.payload)
+			}
+		})
+	}
+}
+
+func TestResponsesStreamEventsPreserveTypedFields(t *testing.T) {
+	delta, err := decodeResponsesEvent("response.output_text.delta", []byte(`{
+		"type":"response.output_text.delta","sequence_number":3,"item_id":"msg_1","output_index":1,"content_index":2,
+		"delta":"hello","logprobs":[{"token":"hello","logprob":-0.1,"top_logprobs":[]}]
+	}`))
+	if err != nil || delta.Response == nil || delta.Response.Sequence != 3 || delta.Response.ItemID != "msg_1" ||
+		delta.Response.OutputIndex != 1 || delta.Response.ContentIndex != 2 || delta.Response.Delta != "hello" || len(delta.Response.Logprobs) == 0 {
+		t.Fatalf("text delta=%#v err=%v", delta, err)
+	}
+
+	item, err := decodeResponsesEvent("", []byte(`{
+		"type":"response.output_item.added","sequence_number":4,"output_index":0,
+		"item":{"id":"call_1","type":"function_call","status":"in_progress","call_id":"call_public","name":"weather","arguments":""}
+	}`))
+	if err != nil || item.Response == nil || item.Response.Item == nil || item.Response.Item.CallID != "call_public" || item.Response.Item.Name != "weather" {
+		t.Fatalf("output item=%#v err=%v", item, err)
+	}
+
+	part, err := decodeResponsesEvent("", []byte(`{
+		"type":"response.content_part.done","sequence_number":5,"item_id":"msg_1","output_index":0,"content_index":0,
+		"part":{"type":"refusal","refusal":"cannot comply"}
+	}`))
+	if err != nil || part.Response == nil || part.Response.Part == nil || part.Response.Part.Type != "refusal" || part.Response.Part.Refusal != "cannot comply" {
+		t.Fatalf("content part=%#v err=%v", part, err)
+	}
+
+	reasoningPart, err := decodeResponsesEvent("", []byte(`{
+		"type":"response.reasoning_part.added","sequence_number":6,"item_id":"reason_1","output_index":0,"content_index":0,
+		"part":{"type":"reasoning_text","text":""}
+	}`))
+	if err != nil || reasoningPart.Response == nil || reasoningPart.Response.Part == nil || reasoningPart.Response.Part.Type != "reasoning_text" {
+		t.Fatalf("reasoning part=%#v err=%v", reasoningPart, err)
+	}
+
+	completed, err := decodeResponsesEvent("", []byte(`{
+		"type":"response.completed","sequence_number":7,
+		"response":{"id":"resp_1","model":"upstream","status":"completed","output":[
+			{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello","annotations":[],"logprobs":[]}]}
+		],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}
+	}`))
+	if err != nil || !completed.Terminal || completed.Usage == nil || completed.Usage.TotalTokens != 3 || completed.Response == nil ||
+		completed.Response.Snapshot == nil || completed.Response.Snapshot.Responses.Output[0].Content[0].Text != "hello" {
+		t.Fatalf("completed=%#v err=%v", completed, err)
+	}
+}
+
+func TestResponsesStreamRejectsNonIncreasingSequenceNumbers(t *testing.T) {
+	stream := newEventStream(io.NopCloser(strings.NewReader(
+		"event: response.output_text.delta\n"+
+			"data: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"one\"}\n\n"+
+			"event: response.output_text.done\n"+
+			"data: {\"type\":\"response.output_text.done\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"text\":\"one\"}\n\n",
+	)), contract.OperationResponses, 4096)
+	defer stream.Close()
+	if _, err := stream.Next(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stream.Next(context.Background()); err == nil {
+		t.Fatal("accepted a duplicate Responses sequence number")
 	}
 }
 
@@ -642,6 +861,24 @@ func TestRequestTimeoutCoversResponseBody(t *testing.T) {
 	var typed *contract.Error
 	if !errors.As(err, &typed) || typed.Code != contract.ErrorTimeout || typed.HTTPStatus != http.StatusGatewayTimeout || !typed.Retryable {
 		t.Fatalf("response-body timeout = %#v, want retryable timeout error", err)
+	}
+}
+
+func TestConnectTimeoutDoesNotLimitInferenceTime(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		time.Sleep(30 * time.Millisecond)
+		response.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(response, `{"data":[{"index":0,"embedding":[0.1]}]}`)
+	}))
+	defer server.Close()
+	adapter := buildAdapter(t, server, `{}`, Factory{})
+	configured := deployment()
+	configured.ConnectTimeout = 5 * time.Millisecond
+	configured.RequestTimeout = time.Second
+	result, err := adapter.Invoke(context.Background(), configured, contract.Request{Operation: contract.OperationEmbeddings,
+		Embeddings: &contract.EmbeddingsRequest{Input: contract.EmbeddingInput{Texts: []string{"hi"}}}})
+	if err != nil || result.Embeddings == nil {
+		t.Fatalf("connect timeout incorrectly bounded inference: result=%#v err=%v", result, err)
 	}
 }
 

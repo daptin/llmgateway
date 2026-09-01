@@ -37,10 +37,21 @@ func applyModelParameterPolicy(model catalog.Model, request contract.Request) (c
 func dropOptionalCapability(request contract.Request, capability string) (contract.Request, error) {
 	switch capability {
 	case "logprobs":
-		chat := *request.Chat
-		chat.Logprobs = false
-		chat.TopLogprobs = 0
-		request.Chat = &chat
+		switch request.Operation {
+		case contract.OperationChat:
+			chat := *request.Chat
+			chat.Logprobs = false
+			chat.TopLogprobs = 0
+			request.Chat = &chat
+		case contract.OperationTextCompletion:
+			completion := *request.TextCompletion
+			completion.Logprobs = nil
+			request.TextCompletion = &completion
+		case contract.OperationResponses:
+			responses := *request.Responses
+			responses.TopLogprobs = nil
+			request.Responses = &responses
+		}
 	case "json_schema":
 		switch request.Operation {
 		case contract.OperationChat:
@@ -56,6 +67,43 @@ func dropOptionalCapability(request contract.Request, capability string) (contra
 		embeddings := *request.Embeddings
 		embeddings.Dimensions = 0
 		request.Embeddings = &embeddings
+	case "parallel_tools":
+		switch request.Operation {
+		case contract.OperationChat:
+			chat := *request.Chat
+			chat.ParallelToolCalls = nil
+			request.Chat = &chat
+		case contract.OperationResponses:
+			responses := *request.Responses
+			responses.ParallelToolCalls = nil
+			request.Responses = &responses
+		}
+	case "penalties":
+		switch request.Operation {
+		case contract.OperationChat:
+			chat := *request.Chat
+			chat.FrequencyPenalty = nil
+			chat.PresencePenalty = nil
+			request.Chat = &chat
+		case contract.OperationTextCompletion:
+			completion := *request.TextCompletion
+			completion.FrequencyPenalty = nil
+			completion.PresencePenalty = nil
+			completion.LogitBias = nil
+			request.TextCompletion = &completion
+		}
+	case "reasoning":
+		switch request.Operation {
+		case contract.OperationChat:
+			chat := *request.Chat
+			chat.ReasoningEffort = ""
+			request.Chat = &chat
+		case contract.OperationResponses:
+			responses := *request.Responses
+			responses.ReasoningEffort = ""
+			responses.ReasoningSummary = ""
+			request.Responses = &responses
+		}
 	case "tools":
 		switch request.Operation {
 		case contract.OperationChat:
@@ -75,7 +123,7 @@ func dropOptionalCapability(request contract.Request, capability string) (contra
 			responses.ToolChoice = nil
 			request.Responses = &responses
 		}
-	case "vision", "audio", "token_ids":
+	case "vision", "audio", "files", "token_ids", "streaming":
 		return contract.Request{}, fmt.Errorf("semantic input cannot be removed")
 	default:
 		return contract.Request{}, fmt.Errorf("unsupported capability cannot be removed")
@@ -115,12 +163,15 @@ func requiredAdapterFeatures(request contract.Request) []string {
 		if request.Chat.ReasoningEffort != "" {
 			add("reasoning")
 		}
-	case contract.OperationResponses:
+	case contract.OperationResponses, contract.OperationResponseCompact:
 		if len(request.Responses.Tools) != 0 || request.Responses.ToolChoice != nil || responsesUseTools(request.Responses.Input) {
 			add("tools")
 		}
 		if responsesUsePart(request.Responses.Input, "input_image") {
 			add("vision")
+		}
+		if responsesUsePart(request.Responses.Input, "input_file") {
+			add("files")
 		}
 		if request.Responses.TextFormat != nil && request.Responses.TextFormat.Type == "json_schema" {
 			add("json_schema")
@@ -128,8 +179,21 @@ func requiredAdapterFeatures(request contract.Request) []string {
 		if request.Responses.ParallelToolCalls != nil {
 			add("parallel_tools")
 		}
-		if request.Responses.ReasoningEffort != "" {
+		if request.Responses.ReasoningEffort != "" || request.Responses.ReasoningSummary != "" {
 			add("reasoning")
+		}
+		if request.Responses.TopLogprobs != nil {
+			add("logprobs")
+		}
+	case contract.OperationTextCompletion:
+		if len(request.TextCompletion.Prompt.Tokens) != 0 {
+			add("token_ids")
+		}
+		if request.TextCompletion.Logprobs != nil {
+			add("logprobs")
+		}
+		if request.TextCompletion.FrequencyPenalty != nil || request.TextCompletion.PresencePenalty != nil || len(request.TextCompletion.LogitBias) != 0 {
+			add("penalties")
 		}
 	case contract.OperationEmbeddings:
 		if len(request.Embeddings.Input.Tokens) != 0 {
@@ -137,6 +201,13 @@ func requiredAdapterFeatures(request contract.Request) []string {
 		}
 		if request.Embeddings.Dimensions != 0 {
 			add("dimensions")
+		}
+	case contract.OperationModeration:
+		for _, input := range request.Moderation.Input {
+			if input.Type == "image_url" {
+				add("vision")
+				break
+			}
 		}
 	}
 	result := make([]string, 0, len(features))

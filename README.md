@@ -24,6 +24,7 @@ so fields with similar names cannot collide:
 ```json
 {
   "chat": {"temperature": 0, "max_completion_tokens": 512},
+  "text_completion": {"temperature": 0, "max_tokens": 512},
   "responses": {"max_output_tokens": 512},
   "embeddings": {"encoding_format": "float"},
   "image_generation": {"n": 1, "response_format": "b64_json"}

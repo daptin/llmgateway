@@ -22,15 +22,37 @@ type responsesRequest struct {
 	Text               *responseText      `json:"text,omitempty"`
 	MaxOutputTokens    *int64             `json:"max_output_tokens,omitempty"`
 	Store              *bool              `json:"store,omitempty"`
+	Background         *bool              `json:"background,omitempty"`
 	PreviousResponseID *string            `json:"previous_response_id,omitempty"`
 	Temperature        *float64           `json:"temperature,omitempty"`
 	TopP               *float64           `json:"top_p,omitempty"`
 	ParallelToolCalls  *bool              `json:"parallel_tool_calls,omitempty"`
 	Reasoning          *responseReasoning `json:"reasoning,omitempty"`
+	PromptCacheKey     string             `json:"prompt_cache_key,omitempty"`
+	SafetyIdentifier   string             `json:"safety_identifier,omitempty"`
+	ServiceTier        string             `json:"service_tier,omitempty"`
+	Truncation         string             `json:"truncation,omitempty"`
+	User               string             `json:"user,omitempty"`
+	TopLogprobs        *int               `json:"top_logprobs,omitempty"`
+}
+
+type compactResponsesRequest struct {
+	Model              string          `json:"model"`
+	Input              json.RawMessage `json:"input"`
+	Instructions       string          `json:"instructions,omitempty"`
+	PreviousResponseID *string         `json:"previous_response_id,omitempty"`
+	PromptCacheKey     string          `json:"prompt_cache_key,omitempty"`
+	PromptCacheOptions *struct {
+		Mode string `json:"mode,omitempty"`
+		TTL  string `json:"ttl,omitempty"`
+	} `json:"prompt_cache_options,omitempty"`
+	PromptCacheRetention string `json:"prompt_cache_retention,omitempty"`
+	ServiceTier          string `json:"service_tier,omitempty"`
 }
 
 type responseReasoning struct {
-	Effort string `json:"effort"`
+	Effort  string `json:"effort"`
+	Summary string `json:"summary,omitempty"`
 }
 
 type responseText struct {
@@ -46,13 +68,14 @@ type responseTextFormat struct {
 }
 
 type responseInputItem struct {
-	Type      string          `json:"type,omitempty"`
-	Role      string          `json:"role,omitempty"`
-	Content   json.RawMessage `json:"content,omitempty"`
-	CallID    string          `json:"call_id,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Arguments string          `json:"arguments,omitempty"`
-	Output    string          `json:"output,omitempty"`
+	Type             string          `json:"type,omitempty"`
+	Role             string          `json:"role,omitempty"`
+	Content          json.RawMessage `json:"content,omitempty"`
+	CallID           string          `json:"call_id,omitempty"`
+	Name             string          `json:"name,omitempty"`
+	Arguments        string          `json:"arguments,omitempty"`
+	Output           string          `json:"output,omitempty"`
+	EncryptedContent string          `json:"encrypted_content,omitempty"`
 }
 
 type responseTool struct {
@@ -68,6 +91,9 @@ type responseContentPart struct {
 	Text     string `json:"text,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
 	Detail   string `json:"detail,omitempty"`
+	FileID   string `json:"file_id,omitempty"`
+	FileData string `json:"file_data,omitempty"`
+	Filename string `json:"filename,omitempty"`
 }
 
 func (h *Handler) responses(response http.ResponseWriter, request *http.Request) {
@@ -113,11 +139,75 @@ func (h *Handler) responses(response http.ResponseWriter, request *http.Request)
 	writeJSON(response, http.StatusOK, id, encoded)
 }
 
+func (h *Handler) compactResponses(response http.ResponseWriter, request *http.Request) {
+	id, err := h.requestID(request)
+	if err != nil {
+		writeError(response, err, "")
+		return
+	}
+	principal, err := h.authenticate(request)
+	if err != nil {
+		writeError(response, err, id)
+		return
+	}
+	body, err := readJSONBody(response, request, h.maxBody)
+	if err != nil {
+		writeError(response, err, id)
+		return
+	}
+	var wire compactResponsesRequest
+	if err := decodeStrict(body, &wire); err != nil {
+		writeError(response, gatewayError(contract.ErrorInvalidRequest, "invalid response compaction request", http.StatusBadRequest, false, err), id)
+		return
+	}
+	canonical, err := canonicalResponseCompaction(id, wire, int64(len(body)))
+	if err != nil {
+		writeError(response, err, id)
+		return
+	}
+	result, err := h.engine.Invoke(request.Context(), principal, canonical)
+	if err != nil {
+		writeError(response, err, id)
+		return
+	}
+	encoded, err := encodeCompactedResponse(result)
+	if err != nil {
+		writeError(response, err, id)
+		return
+	}
+	writeJSON(response, http.StatusOK, id, encoded)
+}
+
+func canonicalResponseCompaction(id contract.ID, wire compactResponsesRequest, requestBytes int64) (contract.Request, error) {
+	if strings.TrimSpace(wire.Model) == "" || len(bytes.TrimSpace(wire.Input)) == 0 {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "model and input are required", http.StatusBadRequest, false, nil)
+	}
+	if wire.PreviousResponseID != nil {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "stateful response compaction is not supported", http.StatusBadRequest, false, nil)
+	}
+	input, err := convertResponseInput(wire.Input)
+	if err != nil {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid response compaction input", http.StatusBadRequest, false, err)
+	}
+	canonical := &contract.ResponsesRequest{Instructions: wire.Instructions, Input: input, PromptCacheKey: wire.PromptCacheKey,
+		PromptCacheRetention: wire.PromptCacheRetention, ServiceTier: wire.ServiceTier}
+	if wire.PromptCacheOptions != nil {
+		canonical.PromptCacheMode = wire.PromptCacheOptions.Mode
+		canonical.PromptCacheTTL = wire.PromptCacheOptions.TTL
+	}
+	request := contract.Request{ID: id, Operation: contract.OperationResponseCompact, PublicModel: wire.Model,
+		EstimatedUsage: contract.Usage{InputTokens: requestBytes, TotalTokens: requestBytes, Estimated: true}, Responses: canonical}
+	if err := request.Validate(); err != nil {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid response compaction request", http.StatusBadRequest, false, err)
+	}
+	return request, nil
+}
+
 func (h *Handler) canonicalResponse(id contract.ID, wire responsesRequest, requestBytes int64) (contract.Request, error) {
 	if strings.TrimSpace(wire.Model) == "" || len(bytes.TrimSpace(wire.Input)) == 0 {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "model and input are required", http.StatusBadRequest, false, nil)
 	}
-	if wire.Store != nil || wire.PreviousResponseID != nil {
+	if (wire.Store != nil && *wire.Store) || (wire.Background != nil && *wire.Background) || wire.PreviousResponseID != nil {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "stateful responses are not supported", http.StatusBadRequest, false, nil)
 	}
 	var maximum int64
@@ -157,12 +247,34 @@ func (h *Handler) canonicalResponse(id contract.ID, wire responsesRequest, reque
 	canonical.Temperature = wire.Temperature
 	canonical.TopP = wire.TopP
 	canonical.ParallelToolCalls = wire.ParallelToolCalls
+	canonical.PromptCacheKey = wire.PromptCacheKey
+	canonical.SafetyIdentifier = wire.SafetyIdentifier
+	canonical.ServiceTier = wire.ServiceTier
+	canonical.Truncation = wire.Truncation
+	canonical.User = wire.User
+	canonical.TopLogprobs = wire.TopLogprobs
+	if len(wire.SafetyIdentifier) > 64 {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "safety_identifier exceeds 64 characters", http.StatusBadRequest, false, nil)
+	}
+	if wire.ServiceTier != "" && wire.ServiceTier != "auto" && wire.ServiceTier != "default" && wire.ServiceTier != "flex" && wire.ServiceTier != "scale" && wire.ServiceTier != "priority" && wire.ServiceTier != "fast" && wire.ServiceTier != "ultrafast" {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid service_tier", http.StatusBadRequest, false, nil)
+	}
+	if wire.Truncation != "" && wire.Truncation != "auto" && wire.Truncation != "disabled" {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid truncation", http.StatusBadRequest, false, nil)
+	}
+	if wire.TopLogprobs != nil && (*wire.TopLogprobs < 0 || *wire.TopLogprobs > 20) {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "top_logprobs must be between 0 and 20", http.StatusBadRequest, false, nil)
+	}
 	if wire.Reasoning != nil {
 		if wire.Reasoning.Effort != "none" && wire.Reasoning.Effort != "minimal" && wire.Reasoning.Effort != "low" && wire.Reasoning.Effort != "medium" &&
 			wire.Reasoning.Effort != "high" && wire.Reasoning.Effort != "xhigh" {
 			return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid reasoning effort", http.StatusBadRequest, false, nil)
 		}
 		canonical.ReasoningEffort = wire.Reasoning.Effort
+		if wire.Reasoning.Summary != "" && wire.Reasoning.Summary != "auto" && wire.Reasoning.Summary != "concise" && wire.Reasoning.Summary != "detailed" {
+			return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid reasoning summary", http.StatusBadRequest, false, nil)
+		}
+		canonical.ReasoningSummary = wire.Reasoning.Summary
 	}
 	return contract.Request{
 		ID: id, Operation: contract.OperationResponses, PublicModel: wire.Model, Stream: wire.Stream, MaxOutputTokens: maximum,
@@ -243,6 +355,11 @@ func convertResponseInputItem(item responseInputItem) (contract.ResponseInputIte
 			return contract.ResponseInputItem{}, errors.New("function_call_output requires call_id and output")
 		}
 		return contract.ResponseInputItem{Type: item.Type, CallID: item.CallID, Output: item.Output}, nil
+	case "compaction":
+		if item.EncryptedContent == "" {
+			return contract.ResponseInputItem{}, errors.New("compaction requires encrypted_content")
+		}
+		return contract.ResponseInputItem{Type: item.Type, EncryptedContent: item.EncryptedContent}, nil
 	default:
 		return contract.ResponseInputItem{}, fmt.Errorf("unsupported input item type %q", item.Type)
 	}
@@ -277,6 +394,14 @@ func convertResponseContent(raw json.RawMessage) ([]contract.ContentPart, error)
 				return nil, errors.New("input_image requires image_url")
 			}
 			result = append(result, contract.ContentPart{Type: part.Type, ImageURL: &contract.ImageURL{URL: part.ImageURL, Detail: part.Detail}})
+		case "input_file":
+			if part.FileID != "" {
+				return nil, errors.New("provider-bound file_id input is not supported")
+			}
+			if part.FileData == "" {
+				return nil, errors.New("input_file requires file_data")
+			}
+			result = append(result, contract.ContentPart{Type: part.Type, File: &contract.InputFile{Data: part.FileData, Filename: part.Filename}})
 		default:
 			return nil, fmt.Errorf("unsupported response content type %q", part.Type)
 		}
@@ -304,7 +429,7 @@ func encodeResponse(response contract.Response) (map[string]any, error) {
 	}
 	output := make([]map[string]any, 0, len(response.Responses.Output))
 	for _, item := range response.Responses.Output {
-		encoded, err := encodeResponseOutput(item)
+		encoded, err := encodeResponseOutput(item, false)
 		if err != nil {
 			return nil, err
 		}
@@ -313,60 +438,160 @@ func encodeResponse(response contract.Response) (map[string]any, error) {
 	return map[string]any{
 		"id": response.Responses.ID, "object": "response", "status": response.Responses.Status,
 		"model": response.Model, "output": output,
-		"usage": map[string]any{"input_tokens": response.Usage.InputTokens, "output_tokens": response.Usage.OutputTokens, "total_tokens": response.Usage.TotalTokens},
+		"usage": encodeResponsesUsage(response.Usage),
 	}, nil
 }
 
-func encodeResponseOutput(item contract.ResponseOutputItem) (map[string]any, error) {
-	encoded := map[string]any{"type": item.Type, "id": item.ID, "status": item.Status}
+func encodeCompactedResponse(response contract.Response) (map[string]any, error) {
+	if response.Responses == nil || response.Responses.Object != "response.compaction" || response.Responses.ID == "" || response.Responses.CreatedAt <= 0 {
+		return nil, gatewayError(contract.ErrorProvider, "provider returned an invalid compacted response", http.StatusBadGateway, false, nil)
+	}
+	output := make([]map[string]any, 0, len(response.Responses.Output))
+	for _, item := range response.Responses.Output {
+		encoded, err := encodeResponseOutput(item, true)
+		if err != nil {
+			return nil, err
+		}
+		output = append(output, encoded)
+	}
+	return map[string]any{"id": response.Responses.ID, "object": response.Responses.Object, "created_at": response.Responses.CreatedAt,
+		"output": output, "usage": encodeResponsesUsage(response.Usage)}, nil
+}
+
+func encodeResponsesUsage(usage contract.Usage) map[string]any {
+	value := map[string]any{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens, "total_tokens": usage.TotalTokens}
+	if usage.CacheReadTokens != 0 {
+		value["input_tokens_details"] = map[string]any{"cached_tokens": usage.CacheReadTokens}
+	}
+	if usage.ReasoningTokens != 0 {
+		value["output_tokens_details"] = map[string]any{"reasoning_tokens": usage.ReasoningTokens}
+	}
+	return value
+}
+
+func encodeResponseOutput(item contract.ResponseOutputItem, compact bool) (map[string]any, error) {
+	encoded := map[string]any{"type": item.Type, "id": item.ID}
 	switch item.Type {
 	case "message":
+		inputRole := item.Role == "user" || item.Role == "system" || item.Role == "developer"
+		if item.ID == "" || (item.Role != "assistant" && !(compact && inputRole)) || (item.Role == "assistant" && item.Status == "") {
+			return nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete response message", http.StatusBadGateway, false, nil)
+		}
+		if item.Status != "" {
+			encoded["status"] = item.Status
+		}
 		encoded["role"] = item.Role
 		content := make([]map[string]any, 0, len(item.Content))
 		for _, part := range item.Content {
-			if part.Type != "output_text" {
-				return nil, gatewayError(contract.ErrorProvider, "provider returned unsupported response content", http.StatusBadGateway, false, nil)
+			value, err := encodeResponseContentPart(part)
+			inputPart := part.Type == "input_text" || part.Type == "input_image" || part.Type == "input_file"
+			validPart := item.Role == "assistant" && (part.Type == "output_text" || part.Type == "refusal") || inputRole && inputPart
+			if err != nil || !validPart {
+				return nil, gatewayError(contract.ErrorProvider, "provider returned unsupported response content", http.StatusBadGateway, false, err)
 			}
-			content = append(content, map[string]any{"type": part.Type, "text": part.Text, "annotations": []any{}})
+			content = append(content, value)
 		}
 		encoded["content"] = content
 	case "function_call":
+		encoded["status"] = item.Status
 		encoded["call_id"] = item.CallID
 		encoded["name"] = item.Name
 		encoded["arguments"] = item.Arguments
 	case "reasoning":
+		if item.Status != "" {
+			encoded["status"] = item.Status
+		}
 		summary := make([]map[string]any, 0, len(item.Summary))
 		for _, part := range item.Summary {
-			if part.Type != "summary_text" {
-				return nil, gatewayError(contract.ErrorProvider, "provider returned unsupported reasoning content", http.StatusBadGateway, false, nil)
+			value, err := encodeResponseContentPart(part)
+			if err != nil || part.Type != "summary_text" {
+				return nil, gatewayError(contract.ErrorProvider, "provider returned unsupported reasoning content", http.StatusBadGateway, false, err)
 			}
-			summary = append(summary, map[string]any{"type": part.Type, "text": part.Text})
+			summary = append(summary, value)
 		}
 		encoded["summary"] = summary
+		if item.Content != nil {
+			content := make([]map[string]any, 0, len(item.Content))
+			for _, part := range item.Content {
+				value, err := encodeResponseContentPart(part)
+				if err != nil || part.Type != "reasoning_text" {
+					return nil, gatewayError(contract.ErrorProvider, "provider returned unsupported reasoning content", http.StatusBadGateway, false, err)
+				}
+				content = append(content, value)
+			}
+			encoded["content"] = content
+		}
+	case "compaction":
+		if item.ID == "" || item.EncryptedContent == "" {
+			return nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete compaction item", http.StatusBadGateway, false, nil)
+		}
+		encoded["encrypted_content"] = item.EncryptedContent
+		if item.CreatedBy != "" {
+			encoded["created_by"] = item.CreatedBy
+		}
 	default:
 		return nil, gatewayError(contract.ErrorProvider, "provider returned unsupported response item", http.StatusBadGateway, false, nil)
 	}
 	return encoded, nil
 }
 
+func encodeResponseContentPart(part contract.ContentPart) (map[string]any, error) {
+	value := map[string]any{"type": part.Type}
+	switch part.Type {
+	case "input_text":
+		value["text"] = part.Text
+	case "input_image":
+		if part.ImageURL == nil || part.ImageURL.URL == "" {
+			return nil, errors.New("response input image has no URL")
+		}
+		value["image_url"] = part.ImageURL.URL
+		if part.ImageURL.Detail != "" {
+			value["detail"] = part.ImageURL.Detail
+		}
+	case "input_file":
+		if part.File == nil || part.File.Data == "" {
+			return nil, errors.New("response input file is not inline")
+		}
+		value["file_data"] = part.File.Data
+		if part.File.Filename != "" {
+			value["filename"] = part.File.Filename
+		}
+	case "output_text":
+		value["text"] = part.Text
+		value["annotations"] = []any{}
+		if len(part.Annotations) != 0 {
+			value["annotations"] = json.RawMessage(append([]byte(nil), part.Annotations...))
+		}
+		if len(part.Logprobs) != 0 {
+			value["logprobs"] = json.RawMessage(append([]byte(nil), part.Logprobs...))
+		}
+	case "refusal":
+		value["refusal"] = part.Refusal
+	case "reasoning_text", "summary_text":
+		value["text"] = part.Text
+	default:
+		return nil, fmt.Errorf("unsupported response content part %q", part.Type)
+	}
+	return value, nil
+}
+
 func (h *Handler) streamResponse(response http.ResponseWriter, request *http.Request, principal contract.Principal, canonical contract.Request) {
-	flusher, ok := response.(http.Flusher)
-	if !ok {
-		writeError(response, gatewayError(contract.ErrorInternal, "streaming is unavailable", http.StatusInternalServerError, false, nil), canonical.ID)
-		return
-	}
-	stream, err := h.engine.Stream(request.Context(), principal, canonical)
+	session, err := h.startSSE(response, request, principal, canonical)
 	if err != nil {
-		writeError(response, err, canonical.ID)
+		if session == nil {
+			writeError(response, err, canonical.ID)
+		} else {
+			defer session.Close()
+			if session.Active() {
+				_ = writeResponseSSE(response, "error", encodeErrorEvent(err, canonical.ID))
+				session.flusher.Flush()
+			}
+		}
 		return
 	}
-	defer stream.Close(request.Context())
-	response.Header().Set("Content-Type", "text/event-stream")
-	response.Header().Set("Cache-Control", "no-cache")
-	response.Header().Set("X-Accel-Buffering", "no")
-	response.Header().Set("X-Request-ID", string(canonical.ID))
+	defer session.Close()
 	for {
-		event, nextErr := stream.Next(request.Context())
+		event, nextErr := session.Next()
 		if nextErr != nil {
 			if errors.Is(nextErr, io.EOF) {
 				return
@@ -374,19 +599,19 @@ func (h *Handler) streamResponse(response http.ResponseWriter, request *http.Req
 			if writeResponseSSE(response, "error", encodeErrorEvent(nextErr, canonical.ID)) != nil {
 				return
 			}
-			flusher.Flush()
+			session.flusher.Flush()
 			return
 		}
 		name, data, encodeErr := encodeResponseEvent(canonical, event)
 		if encodeErr != nil {
 			_ = writeResponseSSE(response, "error", encodeErrorEvent(encodeErr, canonical.ID))
-			flusher.Flush()
+			session.flusher.Flush()
 			return
 		}
 		if err := writeResponseSSE(response, name, data); err != nil {
 			return
 		}
-		flusher.Flush()
+		session.flusher.Flush()
 		if event.Terminal {
 			return
 		}
@@ -406,25 +631,98 @@ func encodeResponseEvent(request contract.Request, event contract.StreamEvent) (
 	if delta.ResponseID != "" {
 		payload["response_id"] = delta.ResponseID
 	}
-	if delta.Delta != "" {
-		payload["delta"] = delta.Delta
-	}
-	if delta.Item != nil {
-		item, err := encodeResponseOutput(*delta.Item)
+	switch name {
+	case "response.created", "response.queued", "response.in_progress", "response.completed", "response.incomplete":
+		if delta.Snapshot == nil || delta.Snapshot.Responses == nil {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete response lifecycle event", http.StatusBadGateway, false, nil)
+		}
+		snapshot := *delta.Snapshot
+		snapshot.Model = request.PublicModel
+		if event.Usage != nil {
+			snapshot.Usage = *event.Usage
+		}
+		encoded, err := encodeResponse(snapshot)
+		if err != nil {
+			return "", nil, err
+		}
+		payload["response"] = encoded
+	case "response.output_item.added", "response.output_item.done":
+		if delta.Item == nil || delta.OutputIndex < 0 {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete response output item event", http.StatusBadGateway, false, nil)
+		}
+		item, err := encodeResponseOutput(*delta.Item, false)
 		if err != nil {
 			return "", nil, err
 		}
 		payload["item"] = item
-	}
-	if event.Terminal {
-		usage := contract.Usage{}
-		if event.Usage != nil {
-			usage = *event.Usage
+		payload["output_index"] = delta.OutputIndex
+	case "response.content_part.added", "response.content_part.done", "response.reasoning_part.added", "response.reasoning_part.done":
+		if delta.Part == nil || delta.ItemID == "" || delta.OutputIndex < 0 || delta.ContentIndex < 0 {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete response content part event", http.StatusBadGateway, false, nil)
 		}
-		payload["response"] = map[string]any{
-			"id": delta.ResponseID, "object": "response", "status": "completed", "model": request.PublicModel,
-			"usage": map[string]any{"input_tokens": usage.InputTokens, "output_tokens": usage.OutputTokens, "total_tokens": usage.TotalTokens},
+		part, err := encodeResponseContentPart(*delta.Part)
+		if err != nil {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an invalid response content part", http.StatusBadGateway, false, err)
 		}
+		if strings.HasPrefix(name, "response.reasoning_part.") && delta.Part.Type != "reasoning_text" {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an invalid reasoning part", http.StatusBadGateway, false, nil)
+		}
+		payload["item_id"], payload["output_index"], payload["content_index"], payload["part"] = delta.ItemID, delta.OutputIndex, delta.ContentIndex, part
+	case "response.output_text.delta", "response.reasoning_text.delta", "response.refusal.delta":
+		if delta.ItemID == "" || delta.OutputIndex < 0 || delta.ContentIndex < 0 {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete response text delta event", http.StatusBadGateway, false, nil)
+		}
+		payload["item_id"], payload["output_index"], payload["content_index"], payload["delta"] = delta.ItemID, delta.OutputIndex, delta.ContentIndex, delta.Delta
+		if len(delta.Logprobs) != 0 {
+			payload["logprobs"] = json.RawMessage(append([]byte(nil), delta.Logprobs...))
+		}
+	case "response.output_text.done", "response.reasoning_text.done", "response.refusal.done":
+		if delta.ItemID == "" || delta.OutputIndex < 0 || delta.ContentIndex < 0 {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete response text done event", http.StatusBadGateway, false, nil)
+		}
+		payload["item_id"], payload["output_index"], payload["content_index"] = delta.ItemID, delta.OutputIndex, delta.ContentIndex
+		if name == "response.refusal.done" {
+			payload["refusal"] = delta.Refusal
+		} else {
+			payload["text"] = delta.Text
+		}
+		if len(delta.Logprobs) != 0 {
+			payload["logprobs"] = json.RawMessage(append([]byte(nil), delta.Logprobs...))
+		}
+	case "response.function_call_arguments.delta":
+		if delta.ItemID == "" || delta.OutputIndex < 0 {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete function arguments delta event", http.StatusBadGateway, false, nil)
+		}
+		payload["item_id"], payload["output_index"], payload["delta"] = delta.ItemID, delta.OutputIndex, delta.Delta
+	case "response.function_call_arguments.done":
+		if delta.ItemID == "" || delta.OutputIndex < 0 || delta.Name == "" {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete function arguments done event", http.StatusBadGateway, false, nil)
+		}
+		payload["item_id"], payload["output_index"], payload["arguments"], payload["name"] = delta.ItemID, delta.OutputIndex, delta.Arguments, delta.Name
+	case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
+		if delta.Part == nil || delta.ItemID == "" || delta.OutputIndex < 0 || delta.SummaryIndex < 0 {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete reasoning summary part event", http.StatusBadGateway, false, nil)
+		}
+		part, err := encodeResponseContentPart(*delta.Part)
+		if err != nil || delta.Part.Type != "summary_text" {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an invalid reasoning summary part", http.StatusBadGateway, false, err)
+		}
+		payload["item_id"], payload["output_index"], payload["summary_index"], payload["part"] = delta.ItemID, delta.OutputIndex, delta.SummaryIndex, part
+		if name == "response.reasoning_summary_part.done" && delta.Status != "" {
+			payload["status"] = delta.Status
+		}
+	case "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done":
+		if delta.ItemID == "" || delta.OutputIndex < 0 || delta.SummaryIndex < 0 {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete reasoning summary text event", http.StatusBadGateway, false, nil)
+		}
+		payload["item_id"], payload["output_index"], payload["summary_index"] = delta.ItemID, delta.OutputIndex, delta.SummaryIndex
+		if name == "response.reasoning_summary_text.delta" {
+			payload["delta"] = delta.Delta
+		} else {
+			payload["text"] = delta.Text
+		}
+	default:
+		return "", nil, gatewayError(contract.ErrorProvider, "provider returned an unsupported response event", http.StatusBadGateway, false, nil)
 	}
 	encoded, err := json.Marshal(payload)
 	return name, encoded, err

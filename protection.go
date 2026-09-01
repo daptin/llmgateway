@@ -220,7 +220,7 @@ func firstSemanticEventWithin(ctx context.Context, stream adapter.Stream, timeou
 			copy := *event.Usage
 			usage = &copy
 		}
-		if event.Chat != nil || event.Response != nil {
+		if event.Chat != nil || event.TextCompletion != nil || event.Response != nil {
 			return event, usage, nil
 		}
 		if event.Terminal {

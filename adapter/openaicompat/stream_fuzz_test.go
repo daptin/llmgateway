@@ -12,7 +12,7 @@ import (
 func FuzzEventStreamBoundsAndParsing(f *testing.F) {
 	f.Add("data: [DONE]\n\n", false)
 	f.Add("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hi\"}}]}\n\n", false)
-	f.Add("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"delta\":\"hi\"}\n\n", true)
+	f.Add("event: response.output_text.delta\ndata: {\"type\":\"response.output_text.delta\",\"sequence_number\":1,\"item_id\":\"msg_1\",\"output_index\":0,\"content_index\":0,\"delta\":\"hi\"}\n\n", true)
 	f.Add(strings.Repeat("x", 257), false)
 	f.Fuzz(func(t *testing.T, payload string, responses bool) {
 		if len(payload) > 4096 {

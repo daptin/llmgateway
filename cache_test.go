@@ -79,7 +79,7 @@ func (a *blockingCacheAdapter) callCount() int {
 func TestExactCacheHitUsesSameAccountingPathAndCannotCrossKeys(t *testing.T) {
 	document := testDocument()
 	document.Models[0].Capabilities = map[string]bool{"exact_cache": true}
-	document.Deployments[0].Pricing.InputMicrosPerMillion = 1_000_000
+	document.Deployments[0].Pricing.Rates = map[string]int64{"input_tokens": 1_000_000}
 	provider := testkit.NewFaultAdapter(
 		adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}},
 		testkit.AdapterStep{Response: contract.Response{Chat: &contract.ChatResponse{ID: "first"}, Usage: contract.Usage{InputTokens: 2, OutputTokens: 1, TotalTokens: 3}}},

@@ -26,6 +26,56 @@ func TestSettledUsageRejectsTokenOverflow(t *testing.T) {
 	}
 }
 
+func TestSettledUsageMergesIndependentMeasures(t *testing.T) {
+	usage, err := settledUsage(
+		contract.Usage{Measures: map[string]int64{"search_results": 2}},
+		contract.Usage{Measures: map[string]int64{"request_bytes": 32, "search_queries": 1, "search_results": 10}},
+		catalog.Pricing{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Measures["request_bytes"] != 32 || usage.Measures["search_queries"] != 1 || usage.Measures["search_results"] != 2 {
+		t.Fatalf("merged measures = %#v", usage.Measures)
+	}
+	if !usage.Estimated {
+		t.Fatal("usage must remain estimated while admission-only measures are retained")
+	}
+}
+
+func TestSettledUsageIsActualWhenProviderReplacesEveryEstimate(t *testing.T) {
+	usage, err := settledUsage(
+		contract.Usage{Measures: map[string]int64{"ocr_pages": 2, "document_bytes": 64}},
+		contract.Usage{Estimated: true, Measures: map[string]int64{"ocr_pages": 10, "document_bytes": 64}},
+		catalog.Pricing{},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Estimated || usage.Measures["ocr_pages"] != 2 {
+		t.Fatalf("settled usage=%#v", usage)
+	}
+}
+
+func TestAddUsageAggregatesIndependentMeasuresAndRejectsOverflow(t *testing.T) {
+	usage, err := addUsage(
+		contract.Usage{Measures: map[string]int64{"search_results": 2}},
+		contract.Usage{Measures: map[string]int64{"search_results": 3, "request_bytes": 10}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if usage.Measures["search_results"] != 5 || usage.Measures["request_bytes"] != 10 {
+		t.Fatalf("aggregated measures = %#v", usage.Measures)
+	}
+	if _, err := addUsage(
+		contract.Usage{Measures: map[string]int64{"search_results": math.MaxInt64}},
+		contract.Usage{Measures: map[string]int64{"search_results": 1}},
+	); err == nil {
+		t.Fatal("expected independent measure overflow rejection")
+	}
+}
+
 func FuzzAddUsageRejectsOverflowAndPreservesFields(f *testing.F) {
 	f.Add(make([]byte, 14*8))
 	overflow := make([]byte, 14*8)

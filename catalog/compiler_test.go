@@ -148,6 +148,33 @@ func TestCompiledDefaultsNormalizeWithoutMutatingCaller(t *testing.T) {
 	}
 }
 
+func TestImageDefaultsStayWithTheirOperation(t *testing.T) {
+	document := validDocument()
+	document.Models[0].Operations = []contract.Operation{contract.OperationChat, contract.OperationImageGeneration, contract.OperationImageEdit}
+	document.Models[0].DefaultParameters = []byte(`{"image_generation":{"n":2,"size":"1024x1024","response_format":"b64_json"}}`)
+	document.Deployments[0].Operations = append([]contract.Operation(nil), document.Models[0].Operations...)
+	snapshot, err := Compile(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, err := snapshot.ApplyDefaults("model-1", contract.Request{Operation: contract.OperationImageGeneration,
+		ImageGeneration: &contract.ImageGenerationRequest{}}, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if generation.ImageGeneration.N != 2 || generation.ImageGeneration.Size != "1024x1024" || generation.ImageGeneration.ResponseFormat != "b64_json" {
+		t.Fatalf("generation defaults = %#v", generation.ImageGeneration)
+	}
+	edit, err := snapshot.ApplyDefaults("model-1", contract.Request{Operation: contract.OperationImageEdit,
+		ImageEdit: &contract.ImageEditRequest{}}, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edit.ImageEdit.N != 1 || edit.ImageEdit.ResponseFormat != "url" || edit.ImageGeneration != nil {
+		t.Fatalf("edit defaults = %#v generation=%#v", edit.ImageEdit, edit.ImageGeneration)
+	}
+}
+
 func TestCompileRejectsSamplingDefaultsWithoutCapabilities(t *testing.T) {
 	for _, defaults := range []string{
 		`{"chat":{"frequency_penalty":1}}`, `{"chat":{"parallel_tool_calls":false}}`, `{"chat":{"reasoning_effort":"low"}}`,

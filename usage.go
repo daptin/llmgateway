@@ -16,9 +16,25 @@ import (
 // estimated.
 func settledUsage(reported, estimate contract.Usage, pricing catalog.Pricing) (contract.Usage, error) {
 	usage := reported
+	usedEstimate := false
 	if tokenUsageEmpty(usage) {
-		usage = estimate
-		usage.Estimated = true
+		usage.InputTokens = estimate.InputTokens
+		usage.OutputTokens = estimate.OutputTokens
+		usage.CacheReadTokens = estimate.CacheReadTokens
+		usage.CacheWriteTokens = estimate.CacheWriteTokens
+		usage.ReasoningTokens = estimate.ReasoningTokens
+		usage.TotalTokens = estimate.TotalTokens
+		usedEstimate = !tokenUsageEmpty(estimate)
+	}
+	usage.Measures = mergedMeasures(estimate.Measures, reported.Measures)
+	for name := range estimate.Measures {
+		if _, reportedMeasure := reported.Measures[name]; !reportedMeasure {
+			usedEstimate = true
+		}
+	}
+	usage.Estimated = reported.Estimated || usedEstimate
+	if !usage.Valid() {
+		return contract.Usage{}, errors.New("usage is invalid")
 	}
 	if err := normalizeTokenTotal(&usage); err != nil {
 		return contract.Usage{}, err
@@ -48,6 +64,20 @@ func tokenUsageEmpty(usage contract.Usage) bool {
 		usage.CacheWriteTokens == 0 && usage.ReasoningTokens == 0 && usage.TotalTokens == 0
 }
 
+func mergedMeasures(estimate, reported map[string]int64) map[string]int64 {
+	if len(estimate) == 0 && len(reported) == 0 {
+		return nil
+	}
+	result := make(map[string]int64, len(estimate)+len(reported))
+	for name, value := range estimate {
+		result[name] = value
+	}
+	for name, value := range reported {
+		result[name] = value
+	}
+	return result
+}
+
 func applyRequestExposure(request *contract.Request) error {
 	if request == nil {
 		return errors.New("request is required")
@@ -60,6 +90,13 @@ func applyRequestExposure(request *contract.Request) error {
 			return errors.New("chat output exposure overflows")
 		}
 		output = request.Chat.MaxCompletionTokens * int64(request.Chat.N)
+	case contract.OperationTextCompletion:
+		if request.TextCompletion == nil || request.TextCompletion.BestOf < 0 || request.TextCompletion.MaxTokens < 0 ||
+			(request.TextCompletion.BestOf > 0 && request.TextCompletion.MaxTokens > math.MaxInt64/int64(request.TextCompletion.BestOf)) {
+			return errors.New("text completion output exposure overflows")
+		}
+		output = request.TextCompletion.MaxTokens * int64(request.TextCompletion.BestOf)
+		request.MaxOutputTokens = output
 	case contract.OperationResponses:
 		output = request.MaxOutputTokens
 	}
@@ -103,6 +140,9 @@ func aggregateAttemptUsage(attempts []contract.Attempt) (contract.Usage, error) 
 }
 
 func addUsage(left, right contract.Usage) (contract.Usage, error) {
+	if !left.Valid() || !right.Valid() {
+		return contract.Usage{}, errors.New("aggregate usage is invalid")
+	}
 	values := [][2]int64{
 		{left.InputTokens, right.InputTokens}, {left.OutputTokens, right.OutputTokens},
 		{left.CacheReadTokens, right.CacheReadTokens}, {left.CacheWriteTokens, right.CacheWriteTokens},
@@ -111,13 +151,27 @@ func addUsage(left, right contract.Usage) (contract.Usage, error) {
 	}
 	sums := make([]int64, len(values))
 	for index, pair := range values {
-		if pair[0] < 0 || pair[1] < 0 || pair[0] > math.MaxInt64-pair[1] {
+		if pair[0] > math.MaxInt64-pair[1] {
 			return contract.Usage{}, errors.New("aggregate usage overflows")
 		}
 		sums[index] = pair[0] + pair[1]
 	}
+	measures := make(map[string]int64, len(left.Measures)+len(right.Measures))
+	for name, value := range left.Measures {
+		measures[name] = value
+	}
+	for name, value := range right.Measures {
+		if measures[name] > math.MaxInt64-value {
+			return contract.Usage{}, errors.New("aggregate usage measure overflows")
+		}
+		measures[name] += value
+	}
+	if len(measures) == 0 {
+		measures = nil
+	}
 	return contract.Usage{
 		InputTokens: sums[0], OutputTokens: sums[1], CacheReadTokens: sums[2], CacheWriteTokens: sums[3],
 		ReasoningTokens: sums[4], TotalTokens: sums[5], CostMicros: sums[6], Estimated: left.Estimated || right.Estimated,
+		Measures: measures,
 	}, nil
 }

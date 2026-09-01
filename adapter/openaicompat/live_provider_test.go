@@ -149,8 +149,9 @@ func loadLiveMatrix(t *testing.T) liveMatrix {
 	validFeatures := map[string]bool{
 		"chat": true, "chat_tools": true, "chat_parallel_tools": true, "chat_structured": true,
 		"chat_reasoning": true, "chat_vision": true, "chat_stream": true,
+		"text_completion": true, "text_completion_stream": true,
 		"responses": true, "responses_stream": true, "embedding_string": true, "embedding_array": true,
-		"embedding_tokens": true, "embedding_token_arrays": true, "image": true,
+		"embedding_tokens": true, "embedding_token_arrays": true, "image": true, "rerank": true, "audio_speech": true,
 	}
 	providerNames := make(map[string]bool, len(matrix.Providers))
 	for _, provider := range matrix.Providers {
@@ -203,6 +204,20 @@ func runLiveCase(ctx context.Context, upstream *Adapter, testCase liveCase) (liv
 			}
 		}
 		return liveCaseResult{UsageAvailable: liveUsageAvailable(response.Usage)}, nil
+	case "text_completion", "text_completion_stream":
+		request := contract.Request{Operation: contract.OperationTextCompletion, Stream: testCase.Feature == "text_completion_stream",
+			TextCompletion: &contract.TextCompletionRequest{Prompt: contract.CompletionPrompt{Texts: []string{"Reply with the single word pong."}}, N: 1, BestOf: 1, MaxTokens: 16}}
+		if request.Stream {
+			return consumeLiveStream(ctx, upstream, deployment, request)
+		}
+		response, err := upstream.Invoke(ctx, deployment, request)
+		if err != nil {
+			return liveCaseResult{}, err
+		}
+		if response.TextCompletion == nil || len(response.TextCompletion.Choices) == 0 || !response.Usage.Valid() {
+			return liveCaseResult{}, errors.New("invalid text completion response")
+		}
+		return liveCaseResult{UsageAvailable: liveUsageAvailable(response.Usage)}, nil
 	case "responses", "responses_stream":
 		request := contract.Request{Operation: contract.OperationResponses, Stream: testCase.Feature == "responses_stream", MaxOutputTokens: 64, Responses: &contract.ResponsesRequest{
 			Input: []contract.ResponseInputItem{{Type: "message", Role: "user", Content: []contract.ContentPart{{Type: "input_text", Text: "Reply with the single word pong."}}}},
@@ -241,16 +256,39 @@ func runLiveCase(ctx context.Context, upstream *Adapter, testCase liveCase) (liv
 		if err != nil {
 			return liveCaseResult{}, err
 		}
-		if response.ImageGeneration == nil || len(response.ImageGeneration.Data) == 0 {
+		if response.Images == nil || len(response.Images.Data) == 0 {
 			return liveCaseResult{}, errors.New("invalid image response")
 		}
-		image := response.ImageGeneration.Data[0]
+		image := response.Images.Data[0]
 		if image.Base64 != "" {
 			if decoded, err := base64.StdEncoding.DecodeString(image.Base64); err != nil || len(decoded) == 0 {
 				return liveCaseResult{}, errors.New("invalid base64 image")
 			}
 		} else if !strings.HasPrefix(image.URL, "http") {
 			return liveCaseResult{}, errors.New("image response has no usable content")
+		}
+		return liveCaseResult{UsageAvailable: liveUsageAvailable(response.Usage)}, nil
+	case "rerank":
+		returnDocuments := true
+		response, err := upstream.Invoke(ctx, deployment, contract.Request{Operation: contract.OperationRerank, Rerank: &contract.RerankRequest{
+			Query: "What is the capital of France?", Documents: []contract.RerankDocument{{Text: "Paris is the capital of France."}, {Text: "Berlin is the capital of Germany."}},
+			TopN: 2, ReturnDocuments: &returnDocuments,
+		}})
+		if err != nil {
+			return liveCaseResult{}, err
+		}
+		if response.Rerank == nil || len(response.Rerank.Results) != 2 || response.Rerank.Results[0].Index != 0 || !response.Usage.Valid() {
+			return liveCaseResult{}, errors.New("invalid rerank response")
+		}
+		return liveCaseResult{UsageAvailable: liveUsageAvailable(response.Usage)}, nil
+	case "audio_speech":
+		response, err := upstream.Invoke(ctx, deployment, contract.Request{Operation: contract.OperationAudioSpeech,
+			AudioSpeech: &contract.AudioSpeechRequest{Input: "Hello from the live gateway test.", Voice: "alloy", ResponseFormat: "mp3"}})
+		if err != nil {
+			return liveCaseResult{}, err
+		}
+		if response.AudioSpeech == nil || len(response.AudioSpeech.Data) == 0 || response.AudioSpeech.ContentType != "audio/mpeg" {
+			return liveCaseResult{}, errors.New("invalid speech response")
 		}
 		return liveCaseResult{UsageAvailable: liveUsageAvailable(response.Usage)}, nil
 	default:
@@ -304,7 +342,7 @@ func consumeLiveStream(ctx context.Context, upstream *Adapter, deployment catalo
 			}
 			return liveCaseResult{}, err
 		}
-		if event.Chat != nil || event.Response != nil {
+		if event.Chat != nil || event.TextCompletion != nil || event.Response != nil {
 			semantic = true
 		}
 		if event.Terminal {
@@ -318,6 +356,14 @@ func consumeLiveStream(ctx context.Context, upstream *Adapter, deployment catalo
 }
 
 func liveUsageAvailable(usage contract.Usage) bool {
-	return usage.InputTokens != 0 || usage.OutputTokens != 0 || usage.CacheReadTokens != 0 || usage.CacheWriteTokens != 0 ||
-		usage.ReasoningTokens != 0 || usage.TotalTokens != 0 || usage.CostMicros != 0
+	if usage.InputTokens != 0 || usage.OutputTokens != 0 || usage.CacheReadTokens != 0 || usage.CacheWriteTokens != 0 ||
+		usage.ReasoningTokens != 0 || usage.TotalTokens != 0 || usage.CostMicros != 0 {
+		return true
+	}
+	for _, value := range usage.Measures {
+		if value != 0 {
+			return true
+		}
+	}
+	return false
 }

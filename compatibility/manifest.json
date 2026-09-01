@@ -1,5 +1,5 @@
 {
-  "version": "2026-08-31",
+  "version": "2026-09-02",
   "kind": "target",
   "comparison": {
     "litellm": "1.98.0",
@@ -34,9 +34,45 @@
         "logprobs": "translated",
         "top_logprobs": "translated",
         "parallel_tool_calls": "translated",
-        "reasoning_effort": "translated"
+        "reasoning_effort": "translated",
+        "store": "translated",
+        "prompt_cache_key": "translated"
       },
       "response_fields": {"id":"native","object":"native","created":"translated","model":"native","choices":"translated","usage":"translated"}
+    },
+    {
+      "method": "POST",
+      "path": "/v1/completions",
+      "request_fields": {
+        "model": "native",
+        "prompt": "translated",
+        "best_of": "translated",
+        "echo": "translated",
+        "frequency_penalty": "translated",
+        "logit_bias": "translated",
+        "logprobs": "translated",
+        "max_tokens": "translated",
+        "n": "translated",
+        "presence_penalty": "translated",
+        "seed": "translated",
+        "stop": "translated",
+        "stream": "native",
+        "stream_options.include_usage": "native",
+        "suffix": "translated",
+        "temperature": "translated",
+        "top_p": "translated",
+        "user": "translated"
+      },
+      "response_fields": {"id":"native","object":"native","created":"translated","model":"native","choices":"translated","usage":"translated"}
+    },
+    {
+      "method": "POST",
+      "path": "/v1/messages",
+      "request_fields": {
+        "model":"native","messages":"translated","system":"translated","max_tokens":"translated","stop_sequences":"translated",
+        "stream":"native","temperature":"translated","top_p":"translated","tools":"translated","tool_choice":"translated","metadata.user_id":"translated"
+      },
+      "response_fields": {"id":"translated","type":"native","role":"native","content":"translated","model":"native","stop_reason":"translated","stop_sequence":"translated","usage":"translated"}
     },
     {
       "method": "POST",
@@ -54,10 +90,27 @@
         "top_p": "translated",
         "parallel_tool_calls": "translated",
         "reasoning.effort": "translated",
+        "reasoning.summary": "translated",
+        "prompt_cache_key": "translated",
+        "safety_identifier": "translated",
+        "service_tier": "translated",
+        "truncation": "translated",
+        "user": "translated",
+        "top_logprobs": "translated",
         "store": "rejected",
+        "background": "rejected",
         "previous_response_id": "rejected"
       },
       "response_fields": {"id":"translated","object":"native","status":"translated","model":"native","output":"translated","usage":"translated"}
+    },
+    {
+      "method": "POST",
+      "path": "/v1/responses/compact",
+      "request_fields": {
+        "model":"native","input":"translated","instructions":"translated","previous_response_id":"rejected",
+        "prompt_cache_key":"translated","prompt_cache_options":"translated","prompt_cache_retention":"translated","service_tier":"translated"
+      },
+      "response_fields": {"id":"translated","object":"native","created_at":"translated","output":"translated","usage":"translated"}
     },
     {
       "method": "POST",
@@ -84,11 +137,171 @@
       },
       "response_fields": {"created":"translated","data":"translated"}
     },
+    {
+      "method": "POST",
+      "path": "/v1/moderations",
+      "request_fields": {"model":"native","input":"translated"},
+      "response_fields": {"id":"translated","model":"native","results":"translated"}
+    },
+    {
+      "method": "POST",
+      "path": "/v1/rerank",
+      "request_fields": {
+        "model":"native","query":"translated","documents":"translated","top_n":"translated",
+        "rank_fields":"translated","return_documents":"translated","max_chunks_per_doc":"translated",
+        "max_tokens_per_doc":"translated","instruction":"translated"
+      },
+      "response_fields": {"id":"translated","results":"translated","meta":"translated"}
+    },
+    {
+      "method": "POST",
+      "path": "/rerank",
+      "request_fields": {
+        "model":"native","query":"translated","documents":"translated","top_n":"translated",
+        "rank_fields":"translated","return_documents":"translated","max_chunks_per_doc":"translated",
+        "max_tokens_per_doc":"translated","instruction":"translated"
+      },
+      "response_fields": {"id":"translated","results":"translated","meta":"translated"}
+    },
+    {
+      "method": "POST",
+      "path": "/v2/rerank",
+      "request_fields": {
+        "model":"native","query":"translated","documents":"translated","top_n":"translated",
+        "rank_fields":"translated","return_documents":"translated","max_chunks_per_doc":"translated",
+        "max_tokens_per_doc":"translated","instruction":"translated"
+      },
+      "response_fields": {"id":"translated","results":"translated","meta":"translated"}
+    },
+    {
+      "method": "POST", "path": "/v1/audio/speech",
+      "request_fields": {"model":"native","input":"translated","voice":"translated","instructions":"translated","speed":"translated","response_format":"translated"},
+      "response_fields": {"audio":"translated"}
+    },
+    {
+      "method": "POST", "path": "/v1/images/edits",
+      "request_fields": {"model":"native","image":"translated","image[]":"translated","mask":"translated","prompt":"translated","n":"translated","size":"translated","quality":"translated","response_format":"translated","user":"translated","background":"translated","input_fidelity":"translated","output_format":"translated","output_compression":"translated","moderation":"translated"},
+      "response_fields": {"created":"translated","data":"translated"}
+    },
+    {
+      "method": "POST", "path": "/v1/images/variations",
+      "request_fields": {"model":"native","image":"translated","n":"translated","size":"translated","response_format":"translated","user":"translated"},
+      "response_fields": {"created":"translated","data":"translated"}
+    },
+    {
+      "method": "POST", "path": "/v1/audio/transcriptions",
+      "request_fields": {"model":"native","file":"translated","language":"translated","prompt":"translated","temperature":"translated","response_format":"translated","timestamp_granularities[]":"translated"},
+      "response_fields": {"transcription":"translated"}
+    },
+    {
+      "method": "POST", "path": "/v1/audio/translations",
+      "request_fields": {"model":"native","file":"translated","prompt":"translated","temperature":"translated","response_format":"translated"},
+      "response_fields": {"translation":"translated"}
+    },
+    {
+      "method": "POST", "path": "/v1/search",
+      "request_fields": {"search_tool_name":"native","query":"translated","max_results":"translated","search_domain_filter":"translated","max_tokens_per_page":"translated","country":"translated"},
+      "response_fields": {"object":"native","results":"translated"}
+    },
+    {
+      "method": "POST", "path": "/v1/search/{tool}",
+      "request_fields": {"search_tool_name":"native","query":"translated","max_results":"translated","search_domain_filter":"translated","max_tokens_per_page":"translated","country":"translated"},
+      "response_fields": {"object":"native","results":"translated"}
+    },
+    {
+      "method": "POST", "path": "/v1/ocr",
+      "request_fields": {"model":"native","document":"translated","pages":"translated","include_image_base64":"translated","image_limit":"translated","image_min_size":"translated","bbox_annotation_format":"translated","document_annotation_format":"translated","document_annotation_prompt":"translated","extract_header":"translated","extract_footer":"translated","table_format":"translated","confidence_scores_granularity":"translated","include_blocks":"translated","id":"translated","req_format":"translated"},
+      "response_fields": {"object":"native","pages":"translated","model":"native","document_annotation":"translated","usage_info":"translated","content":"translated","tables":"translated","keyValuePairs":"translated"}
+    },
+    {
+      "method": "POST", "path": "/ocr",
+      "request_fields": {"model":"native","document":"translated","pages":"translated","include_image_base64":"translated","image_limit":"translated","image_min_size":"translated","bbox_annotation_format":"translated","document_annotation_format":"translated","document_annotation_prompt":"translated","extract_header":"translated","extract_footer":"translated","table_format":"translated","confidence_scores_granularity":"translated","include_blocks":"translated","id":"translated","req_format":"translated"},
+      "response_fields": {"object":"native","pages":"translated","model":"native","document_annotation":"translated","usage_info":"translated","content":"translated","tables":"translated","keyValuePairs":"translated"}
+    },
+    {
+      "method": "POST", "path": "/v1/files",
+      "request_fields": {"file":"native","purpose":"native","expires_after.anchor":"native","expires_after.seconds":"native"},
+      "response_fields": {"id":"native","object":"native","bytes":"translated","created_at":"native","filename":"native","purpose":"native","status":"native","status_details":"native","expires_at":"native"}
+    },
+    {
+      "method": "GET", "path": "/v1/files",
+      "request_fields": {"purpose":"native","after":"native","limit":"native","order":"native"},
+      "response_fields": {"object":"native","data":"native","first_id":"native","last_id":"native","has_more":"native"}
+    },
+    {
+      "method": "GET", "path": "/v1/files/{id}",
+      "request_fields": {"id":"native"},
+      "response_fields": {"id":"native","object":"native","bytes":"translated","created_at":"native","filename":"native","purpose":"native","status":"native","status_details":"native","expires_at":"native"}
+    },
+    {
+      "method": "GET", "path": "/v1/files/{id}/content",
+      "request_fields": {"id":"native"},
+      "response_fields": {"content":"native"}
+    },
+    {
+      "method": "DELETE", "path": "/v1/files/{id}",
+      "request_fields": {"id":"native"},
+      "response_fields": {"id":"native","object":"native","deleted":"native"}
+    },
+    {
+      "method": "POST", "path": "/v1/batches",
+      "request_fields": {"input_file_id":"native","endpoint":"native","completion_window":"native","metadata":"native","output_expires_after.anchor":"native","output_expires_after.seconds":"native"},
+      "response_fields": {"id":"native","object":"native","endpoint":"native","errors":"native","input_file_id":"native","completion_window":"native","status":"native","output_file_id":"native","error_file_id":"native","created_at":"native","in_progress_at":"native","expires_at":"native","finalizing_at":"native","completed_at":"native","failed_at":"native","expired_at":"native","cancelling_at":"native","cancelled_at":"native","request_counts":"native","metadata":"native"}
+    },
+    {
+      "method": "GET", "path": "/v1/batches",
+      "request_fields": {"after":"native","limit":"native"},
+      "response_fields": {"object":"native","data":"native","first_id":"native","last_id":"native","has_more":"native"}
+    },
+    {
+      "method": "GET", "path": "/v1/batches/{id}",
+      "request_fields": {"id":"native"},
+      "response_fields": {"id":"native","object":"native","endpoint":"native","errors":"native","input_file_id":"native","completion_window":"native","status":"native","output_file_id":"native","error_file_id":"native","created_at":"native","in_progress_at":"native","expires_at":"native","finalizing_at":"native","completed_at":"native","failed_at":"native","expired_at":"native","cancelling_at":"native","cancelled_at":"native","request_counts":"native","metadata":"native"}
+    },
+    {
+      "method": "POST", "path": "/v1/batches/{id}/cancel",
+      "request_fields": {"id":"native"},
+      "response_fields": {"id":"native","object":"native","status":"native"}
+    },
     {"method": "GET", "path": "/v1/models", "request_fields": {}, "response_fields": {"object":"native","data":"translated"}},
     {"method": "GET", "path": "/v1/models/{id}", "request_fields": {}, "response_fields": {"id":"native","object":"native","created":"translated","owned_by":"translated","llmgateway":"native"}}
   ],
+  "unsupported_endpoints": [
+    {"method":"POST","path":"/v1/messages/count_tokens","reason":"requires a tokenizer port with model-revision-pinned tokenization; byte or character estimates are not protocol compatible"},
+    {"method":"POST","path":"/utils/token_counter","reason":"requires the same tokenizer invariant as messages count_tokens"},
+    {"method":"POST","path":"/v1beta/models/{model}:countTokens","reason":"requires a lossless Gemini CountTokens contract and provider-certified token accounting"},
+    {"method":"GET","path":"/v1/search/tools","reason":"requires an authorized provider-backed search-tool discovery contract"},
+    {"method":"GET","path":"/v1/responses/{id}","reason":"stored Responses state is not owned by the stateless gateway module"},
+    {"method":"DELETE","path":"/v1/responses/{id}","reason":"stored Responses state is not owned by the stateless gateway module"},
+    {"method":"POST","path":"/v1/responses/{id}/cancel","reason":"requires a durable background Responses lifecycle and ownership checks"},
+    {"method":"GET","path":"/v1/responses/{id}/input_items","reason":"requires durable stored Response inputs and ownership checks"},
+    {"method":"POST","path":"/v1/videos","reason":"requires a canonical asynchronous video job contract, durable media storage, and provider certification"},
+    {"method":"GET","path":"/v1/videos","reason":"requires the durable video job lifecycle and authorized listing"},
+    {"method":"GET","path":"/v1/videos/{id}","reason":"requires the durable video job lifecycle"},
+    {"method":"GET","path":"/v1/videos/{id}/content","reason":"requires the durable video job lifecycle and bounded media delivery"},
+    {"method":"POST","path":"/v1/videos/{id}/remix","reason":"requires the durable video job lifecycle and a canonical remix contract"},
+    {"method":"POST","path":"/v1/videos/characters","reason":"requires a canonical durable video-character contract and bounded asset storage"},
+    {"method":"GET","path":"/v1/videos/characters/{id}","reason":"requires the durable video-character lifecycle and ownership checks"},
+    {"method":"POST","path":"/v1/videos/edits","reason":"requires a canonical asynchronous video edit contract and durable media storage"},
+    {"method":"POST","path":"/v1/videos/extensions","reason":"requires a canonical asynchronous video extension contract and durable media storage"},
+    {"method":"POST","path":"/v1beta/interactions","reason":"requires a canonical stateful interaction contract and durable ownership semantics"},
+    {"method":"GET","path":"/v1beta/interactions/{id}","reason":"requires the durable interaction lifecycle"},
+    {"method":"DELETE","path":"/v1beta/interactions/{id}","reason":"requires the durable interaction lifecycle and ownership checks"},
+    {"method":"POST","path":"/v1beta/interactions/{id}/cancel","reason":"requires the durable interaction lifecycle and cancellation semantics"},
+    {"method":"POST","path":"/bedrock/model/{model}/converse","reason":"requires a lossless Bedrock Converse protocol adapter; generic pass-through is prohibited"},
+    {"method":"POST","path":"/bedrock/model/{model}/converse-stream","reason":"requires Bedrock event-stream framing and conformance fixtures"},
+    {"method":"POST","path":"/v1beta/models/{model}:generateContent","reason":"requires a lossless Gemini GenerateContent protocol adapter; generic pass-through is prohibited"},
+    {"method":"POST","path":"/v1beta/models/{model}:streamGenerateContent","reason":"requires Gemini streaming framing and conformance fixtures"},
+    {"method":"POST","path":"/model/{model}/invoke","reason":"requires a provider-native invoke contract with bounded request and response validation"},
+    {"method":"POST","path":"/model/{model}/invoke-with-response-stream","reason":"requires provider-native event-stream framing and conformance fixtures"},
+    {"method":"GET","path":"/v1/realtime","reason":"requires a bidirectional realtime session contract, websocket lifecycle, and backpressure limits"},
+    {"method":"POST","path":"/v1/realtime/client_secrets","reason":"requires a provider-neutral ephemeral credential contract and strict secret lifetime handling"},
+    {"method":"POST","path":"/v1/realtime/transcription_sessions","reason":"requires a canonical realtime transcription session contract"},
+    {"method":"POST","path":"/v1/realtime/calls","reason":"requires the bidirectional realtime call lifecycle and backpressure limits"},
+    {"method":"POST","path":"/v1/vector_stores/{id}/search","reason":"requires a canonical vector-search contract and host-owned vector-store authorization"}
+  ],
   "providers": [
-    {"name": "openai-compatible", "operations": {"chat": "translated", "responses": "translated", "embeddings": "translated", "image_generation": "translated"}}
+    {"name": "openai-compatible", "operations": {"chat": "translated", "text_completion": "translated", "responses": "translated", "response_compaction": "translated", "embeddings": "translated", "image_generation": "translated", "image_edit": "translated", "image_variation": "translated", "moderation": "translated", "rerank": "translated", "audio_speech": "translated", "audio_transcription": "translated", "audio_translation": "translated", "search": "translated", "ocr": "translated"}}
   ],
   "error_codes": [
     "invalid_request",
@@ -108,6 +321,29 @@
     "finish": "native",
     "usage": "native",
     "done": "native",
-    "error": "native"
+    "error": "native",
+    "response.created": "translated",
+    "response.queued": "translated",
+    "response.in_progress": "translated",
+    "response.output_item.added": "translated",
+    "response.output_item.done": "translated",
+    "response.content_part.added": "translated",
+    "response.content_part.done": "translated",
+    "response.reasoning_part.added": "translated",
+    "response.reasoning_part.done": "translated",
+    "response.output_text.delta": "translated",
+    "response.output_text.done": "translated",
+    "response.refusal.delta": "translated",
+    "response.refusal.done": "translated",
+    "response.function_call_arguments.delta": "translated",
+    "response.function_call_arguments.done": "translated",
+    "response.reasoning_summary_part.added": "translated",
+    "response.reasoning_summary_part.done": "translated",
+    "response.reasoning_summary_text.delta": "translated",
+    "response.reasoning_summary_text.done": "translated",
+    "response.reasoning_text.delta": "translated",
+    "response.reasoning_text.done": "translated",
+    "response.completed": "translated",
+    "response.incomplete": "translated"
   }
 }

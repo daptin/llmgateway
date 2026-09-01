@@ -20,6 +20,8 @@ type ChatRequest struct {
 	TopLogprobs         int
 	ParallelToolCalls   *bool
 	ReasoningEffort     string
+	Store               *bool
+	PromptCacheKey      string
 }
 
 type Message struct {
@@ -31,10 +33,14 @@ type Message struct {
 }
 
 type ContentPart struct {
-	Type     string
-	Text     string
-	ImageURL *ImageURL
-	Audio    *InputAudio
+	Type        string
+	Text        string
+	Refusal     string
+	Annotations json.RawMessage
+	Logprobs    json.RawMessage
+	ImageURL    *ImageURL
+	Audio       *InputAudio
+	File        *InputFile
 }
 
 type ImageURL struct {
@@ -45,6 +51,11 @@ type ImageURL struct {
 type InputAudio struct {
 	Data   string
 	Format string
+}
+
+type InputFile struct {
+	Data     string
+	Filename string
 }
 
 type Tool struct {

@@ -13,6 +13,20 @@ type usageResponse struct {
 	TotalTokens      int64 `json:"total_tokens"`
 }
 
+type detailedUsageResponse struct {
+	usageResponse
+	PromptTokensDetails     *promptTokensDetailsResponse     `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *completionTokensDetailsResponse `json:"completion_tokens_details,omitempty"`
+}
+
+type promptTokensDetailsResponse struct {
+	CachedTokens int64 `json:"cached_tokens"`
+}
+
+type completionTokensDetailsResponse struct {
+	ReasoningTokens int64 `json:"reasoning_tokens"`
+}
+
 func encodeChatResponse(response contract.Response) (map[string]any, error) {
 	if response.Chat == nil {
 		return nil, gatewayError(contract.ErrorProvider, "provider returned no chat response", 502, false, nil)
@@ -35,7 +49,7 @@ func encodeChatResponse(response contract.Response) (map[string]any, error) {
 	}
 	return map[string]any{
 		"id": response.Chat.ID, "object": "chat.completion", "created": response.Chat.Created,
-		"model": response.Model, "choices": choices, "usage": encodeUsage(response.Usage),
+		"model": response.Model, "choices": choices, "usage": encodeDetailedUsage(response.Usage),
 	}, nil
 }
 
@@ -116,7 +130,7 @@ func encodeChatChunk(request contract.Request, event contract.StreamEvent, inclu
 		chunk["choices"] = []any{choice}
 	}
 	if includeUsage && event.Usage != nil {
-		chunk["usage"] = encodeUsage(*event.Usage)
+		chunk["usage"] = encodeDetailedUsage(*event.Usage)
 	} else {
 		chunk["usage"] = nil
 	}
@@ -125,6 +139,17 @@ func encodeChatChunk(request contract.Request, event contract.StreamEvent, inclu
 
 func encodeUsage(usage contract.Usage) usageResponse {
 	return usageResponse{PromptTokens: usage.InputTokens, CompletionTokens: usage.OutputTokens, TotalTokens: usage.TotalTokens}
+}
+
+func encodeDetailedUsage(usage contract.Usage) detailedUsageResponse {
+	encoded := detailedUsageResponse{usageResponse: encodeUsage(usage)}
+	if usage.CacheReadTokens != 0 {
+		encoded.PromptTokensDetails = &promptTokensDetailsResponse{CachedTokens: usage.CacheReadTokens}
+	}
+	if usage.ReasoningTokens != 0 {
+		encoded.CompletionTokensDetails = &completionTokensDetailsResponse{ReasoningTokens: usage.ReasoningTokens}
+	}
+	return encoded
 }
 
 func encodeErrorEvent(err error, requestID contract.ID) []byte {

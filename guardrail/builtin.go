@@ -203,6 +203,13 @@ func requestText(request contract.Request) string {
 		appendMessages(&builder, request.Chat.Messages)
 		appendTools(&builder, request.Chat.Tools)
 	}
+	if request.TextCompletion != nil {
+		for _, text := range request.TextCompletion.Prompt.Texts {
+			builder.WriteString(text)
+			builder.WriteByte('\n')
+		}
+		builder.WriteString(request.TextCompletion.Suffix)
+	}
 	if request.Responses != nil {
 		builder.WriteString(request.Responses.Instructions)
 		for _, item := range request.Responses.Input {
@@ -222,6 +229,40 @@ func requestText(request contract.Request) string {
 	if request.ImageGeneration != nil {
 		builder.WriteString(request.ImageGeneration.Prompt)
 	}
+	if request.ImageEdit != nil {
+		builder.WriteString(request.ImageEdit.Prompt)
+	}
+	if request.Moderation != nil {
+		for _, input := range request.Moderation.Input {
+			builder.WriteString(input.Text)
+			builder.WriteByte('\n')
+		}
+	}
+	if request.Rerank != nil {
+		builder.WriteString(request.Rerank.Query)
+		builder.WriteString(request.Rerank.Instruction)
+		for _, document := range request.Rerank.Documents {
+			builder.WriteString(document.Text)
+			builder.Write(document.Object)
+			builder.WriteByte('\n')
+		}
+	}
+	if request.AudioSpeech != nil {
+		builder.WriteString(request.AudioSpeech.Input)
+		builder.WriteString(request.AudioSpeech.Instructions)
+	}
+	if request.Transcription != nil {
+		builder.WriteString(request.Transcription.Prompt)
+	}
+	if request.Search != nil {
+		for _, query := range request.Search.Queries {
+			builder.WriteString(query)
+			builder.WriteByte('\n')
+		}
+	}
+	if request.OCR != nil {
+		builder.WriteString(request.OCR.DocumentAnnotationPrompt)
+	}
 	return builder.String()
 }
 
@@ -232,6 +273,11 @@ func responseText(response contract.Response) string {
 			appendMessages(&builder, []contract.Message{choice.Message})
 		}
 	}
+	if response.TextCompletion != nil {
+		for _, choice := range response.TextCompletion.Choices {
+			builder.WriteString(choice.Text)
+		}
+	}
 	if response.Responses != nil {
 		for _, item := range response.Responses.Output {
 			appendParts(&builder, item.Content)
@@ -240,9 +286,35 @@ func responseText(response contract.Response) string {
 			builder.WriteString(item.Arguments)
 		}
 	}
-	if response.ImageGeneration != nil {
-		for _, image := range response.ImageGeneration.Data {
+	if response.Images != nil {
+		for _, image := range response.Images.Data {
 			builder.WriteString(image.RevisedPrompt)
+		}
+	}
+	if response.Rerank != nil {
+		for _, result := range response.Rerank.Results {
+			if result.Document != nil {
+				builder.WriteString(result.Document.Text)
+				builder.Write(result.Document.Object)
+			}
+		}
+	}
+	if response.Transcription != nil {
+		builder.WriteString(response.Transcription.Text)
+	}
+	if response.Search != nil {
+		for _, result := range response.Search.Results {
+			builder.WriteString(result.Title)
+			builder.WriteString(result.Snippet)
+			builder.WriteByte('\n')
+		}
+	}
+	if response.OCR != nil {
+		builder.WriteString(response.OCR.Content)
+		builder.Write(response.OCR.DocumentAnnotation)
+		for _, page := range response.OCR.Pages {
+			builder.WriteString(page.Markdown)
+			builder.WriteByte('\n')
 		}
 	}
 	return builder.String()
@@ -256,6 +328,9 @@ func eventText(event contract.StreamEvent) string {
 			builder.WriteString(call.Function.Name)
 			builder.WriteString(call.Function.Arguments)
 		}
+	}
+	if event.TextCompletion != nil {
+		builder.WriteString(event.TextCompletion.Text)
 	}
 	if event.Response != nil {
 		builder.WriteString(event.Response.Delta)

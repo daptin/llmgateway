@@ -71,11 +71,7 @@ type HealthCheck struct {
 }
 
 type Pricing struct {
-	InputMicrosPerMillion      int64
-	OutputMicrosPerMillion     int64
-	CacheReadMicrosPerMillion  int64
-	CacheWriteMicrosPerMillion int64
-	ReasoningMicrosPerMillion  int64
+	Rates map[string]int64
 }
 
 type Guardrail struct {

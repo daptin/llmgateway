@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -178,6 +179,13 @@ func TestEngineReloadInvokeAndDrain(t *testing.T) {
 		t.Fatalf("unchanged catalog degraded readiness: %+v", status)
 	}
 	assertReadyStatus(t, handler, http.StatusOK)
+	rerankRequest := httptest.NewRequest(http.MethodPost, "/rerank", strings.NewReader(`{"model":"model","query":"q","documents":["d"]}`))
+	rerankRequest.Header.Set("Authorization", "Bearer key")
+	rerankResponse := httptest.NewRecorder()
+	handler.ServeHTTP(rerankResponse, rerankRequest)
+	if rerankResponse.Code == http.StatusNotFound {
+		t.Fatal("reusable HTTP handler did not mount /rerank")
+	}
 	request := chatRequest("request", false)
 	request.EstimatedUsage = contract.Usage{InputTokens: 2, OutputTokens: 8, TotalTokens: 10}
 	response, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, request)
@@ -469,7 +477,7 @@ func TestInvokeConservativelySettlesMissingProviderUsage(t *testing.T) {
 		t.Fatalf("usage = %+v", response.Usage)
 	}
 	completion, ok := store.Completion(request.ID)
-	if !ok || completion.Usage != response.Usage || len(completion.Attempts) != 1 || completion.Attempts[0].Usage != response.Usage {
+	if !ok || !reflect.DeepEqual(completion.Usage, response.Usage) || len(completion.Attempts) != 1 || !reflect.DeepEqual(completion.Attempts[0].Usage, response.Usage) {
 		t.Fatalf("completion = %+v, present=%v", completion, ok)
 	}
 }

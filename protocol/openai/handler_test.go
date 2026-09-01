@@ -32,6 +32,7 @@ type fakeEngine struct {
 	invokeErr     error
 	stream        contract.EventStream
 	streamErr     error
+	streamWait    <-chan struct{}
 	denied        map[string]bool
 }
 
@@ -40,8 +41,15 @@ func (f *fakeEngine) Invoke(_ context.Context, _ contract.Principal, request con
 	return f.invokeResult, f.invokeErr
 }
 
-func (f *fakeEngine) Stream(_ context.Context, _ contract.Principal, request contract.Request) (contract.EventStream, error) {
+func (f *fakeEngine) Stream(ctx context.Context, _ contract.Principal, request contract.Request) (contract.EventStream, error) {
 	f.streamRequest = request
+	if f.streamWait != nil {
+		select {
+		case <-f.streamWait:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 	return f.stream, f.streamErr
 }
 
@@ -264,10 +272,10 @@ func TestChatCanonicalizesTypedMultimodalToolsAndReturnsGoldenResponse(t *testin
 		Chat: &contract.ChatResponse{ID: "chatcmpl_1", Created: 123, Choices: []contract.ChatChoice{{
 			Index: 0, Message: contract.Message{Role: "assistant", ToolCalls: []contract.ToolCall{{ID: "call_1", Type: "function", Function: contract.FunctionCall{Name: "weather", Arguments: `{"city":"Pune"}`}}}}, FinishReason: "tool_calls",
 		}}},
-		Usage: contract.Usage{InputTokens: 9, OutputTokens: 4, TotalTokens: 13},
+		Usage: contract.Usage{InputTokens: 9, OutputTokens: 4, CacheReadTokens: 2, ReasoningTokens: 1, TotalTokens: 13},
 	}}
 	handler := testHandler(t, engine, fakeAuthenticator{principal: contract.Principal{KeyID: "key-1"}})
-	body := `{"model":"allowed","messages":[{"role":"user","content":[{"type":"text","text":"weather"},{"type":"image_url","image_url":{"url":"https://example.test/map.png","detail":"low"}},{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}],"tools":[{"type":"function","function":{"name":"weather","parameters":{"type":"object"},"strict":true}}],"tool_choice":{"type":"function","function":{"name":"weather"}},"response_format":{"type":"json_schema","json_schema":{"name":"forecast","schema":{"type":"object"},"strict":true}},"n":2,"temperature":0.2,"top_p":0.9,"frequency_penalty":-0.5,"presence_penalty":1.25,"stop":["done"],"user":"user-1","seed":7,"logprobs":true,"top_logprobs":3,"parallel_tool_calls":false,"reasoning_effort":"low","max_completion_tokens":32}`
+	body := `{"model":"allowed","messages":[{"role":"user","content":[{"type":"text","text":"weather"},{"type":"image_url","image_url":{"url":"https://example.test/map.png","detail":"low"}},{"type":"input_audio","input_audio":{"data":"AAAA","format":"wav"}}]}],"tools":[{"type":"function","function":{"name":"weather","parameters":{"type":"object"},"strict":true}}],"tool_choice":{"type":"function","function":{"name":"weather"}},"response_format":{"type":"json_schema","json_schema":{"name":"forecast","schema":{"type":"object"},"strict":true}},"n":2,"temperature":0.2,"top_p":0.9,"frequency_penalty":-0.5,"presence_penalty":1.25,"stop":["done"],"user":"user-1","seed":7,"logprobs":true,"top_logprobs":3,"parallel_tool_calls":false,"reasoning_effort":"low","store":false,"prompt_cache_key":"tenant-conversation","max_completion_tokens":32}`
 	response := perform(handler, http.MethodPost, "/v1/chat/completions", body, "key")
 	if response.Code != http.StatusOK {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
@@ -281,7 +289,8 @@ func TestChatCanonicalizesTypedMultimodalToolsAndReturnsGoldenResponse(t *testin
 		t.Fatalf("typed fields were not preserved: %#v", request.Chat)
 	}
 	if request.Chat.FrequencyPenalty == nil || *request.Chat.FrequencyPenalty != -0.5 || request.Chat.PresencePenalty == nil ||
-		*request.Chat.PresencePenalty != 1.25 || request.Chat.ParallelToolCalls == nil || *request.Chat.ParallelToolCalls || request.Chat.ReasoningEffort != "low" {
+		*request.Chat.PresencePenalty != 1.25 || request.Chat.ParallelToolCalls == nil || *request.Chat.ParallelToolCalls || request.Chat.ReasoningEffort != "low" ||
+		request.Chat.Store == nil || *request.Chat.Store || request.Chat.PromptCacheKey != "tenant-conversation" {
 		t.Fatalf("sampling controls were not preserved: %#v", request.Chat)
 	}
 	if request.Chat.N != 2 || request.Chat.Temperature == nil || *request.Chat.Temperature != 0.2 || request.Chat.TopP == nil || *request.Chat.TopP != 0.9 ||
@@ -290,7 +299,7 @@ func TestChatCanonicalizesTypedMultimodalToolsAndReturnsGoldenResponse(t *testin
 		!request.Chat.Logprobs || request.Chat.TopLogprobs != 3 {
 		t.Fatalf("manifested chat controls were not preserved: %#v", request.Chat)
 	}
-	want := `{"choices":[{"finish_reason":"tool_calls","index":0,"message":{"content":null,"role":"assistant","tool_calls":[{"function":{"arguments":"{\"city\":\"Pune\"}","name":"weather"},"id":"call_1","type":"function"}]}}],"created":123,"id":"chatcmpl_1","model":"allowed","object":"chat.completion","usage":{"completion_tokens":4,"prompt_tokens":9,"total_tokens":13}}`
+	want := `{"choices":[{"finish_reason":"tool_calls","index":0,"message":{"content":null,"role":"assistant","tool_calls":[{"function":{"arguments":"{\"city\":\"Pune\"}","name":"weather"},"id":"call_1","type":"function"}]}}],"created":123,"id":"chatcmpl_1","model":"allowed","object":"chat.completion","usage":{"completion_tokens":4,"completion_tokens_details":{"reasoning_tokens":1},"prompt_tokens":9,"prompt_tokens_details":{"cached_tokens":2},"total_tokens":13}}`
 	var gotObject, wantObject any
 	if err := json.Unmarshal(response.Body.Bytes(), &gotObject); err != nil {
 		t.Fatal(err)
@@ -322,7 +331,7 @@ func TestChatRejectsInvalidSamplingControls(t *testing.T) {
 func TestChatStreamingSSEIsDeterministicAndCloses(t *testing.T) {
 	stream := &eventStream{events: []contract.StreamEvent{
 		{Chat: &contract.ChatDelta{ID: "chatcmpl_s", Created: 456, Index: 0, Role: "assistant", Content: "hi"}},
-		{Chat: &contract.ChatDelta{ID: "chatcmpl_s", Created: 456, Index: 0, FinishReason: "stop"}, Usage: &contract.Usage{InputTokens: 2, OutputTokens: 1, TotalTokens: 3}, Terminal: true},
+		{Chat: &contract.ChatDelta{ID: "chatcmpl_s", Created: 456, Index: 0, FinishReason: "stop"}, Usage: &contract.Usage{InputTokens: 2, OutputTokens: 1, CacheReadTokens: 1, ReasoningTokens: 1, TotalTokens: 3}, Terminal: true},
 	}}
 	engine := &fakeEngine{snapshot: testSnapshot(t), stream: stream}
 	handler := testHandler(t, engine, fakeAuthenticator{})
@@ -335,10 +344,34 @@ func TestChatStreamingSSEIsDeterministicAndCloses(t *testing.T) {
 		t.Fatalf("stream lifecycle mismatch: request=%#v closed=%v", engine.streamRequest, stream.closed)
 	}
 	want := "data: {\"choices\":[{\"delta\":{\"content\":\"hi\",\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0}],\"created\":456,\"id\":\"chatcmpl_s\",\"model\":\"allowed\",\"object\":\"chat.completion.chunk\",\"usage\":null}\n\n" +
-		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"created\":456,\"id\":\"chatcmpl_s\",\"model\":\"allowed\",\"object\":\"chat.completion.chunk\",\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3}}\n\n" +
+		"data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"created\":456,\"id\":\"chatcmpl_s\",\"model\":\"allowed\",\"object\":\"chat.completion.chunk\",\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1,\"total_tokens\":3,\"prompt_tokens_details\":{\"cached_tokens\":1},\"completion_tokens_details\":{\"reasoning_tokens\":1}}}\n\n" +
 		"data: [DONE]\n\n"
 	if response.Body.String() != want {
 		t.Fatalf("SSE mismatch\n got: %s\nwant: %s", response.Body.String(), want)
+	}
+}
+
+func TestChatStreamingSendsKeepaliveWhileUpstreamIsSilent(t *testing.T) {
+	release := make(chan struct{})
+	stream := &eventStream{events: []contract.StreamEvent{{
+		Chat: &contract.ChatDelta{ID: "chatcmpl_s", Index: 0, FinishReason: "stop"}, Terminal: true,
+	}}}
+	engine := &fakeEngine{snapshot: testSnapshot(t), stream: stream, streamWait: release}
+	handler, err := NewHandler(engine, fakeAuthenticator{}, Options{
+		StreamKeepalive: 5 * time.Millisecond,
+		NewRequestID:    func() (contract.ID, error) { return "req_generated", nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.AfterFunc(20*time.Millisecond, func() { close(release) })
+	response := perform(handler, http.MethodPost, "/v1/chat/completions",
+		`{"model":"allowed","messages":[{"role":"user","content":"hello"}],"stream":true}`, "key")
+	if response.Code != http.StatusOK || !stream.closed {
+		t.Fatalf("status=%d closed=%v body=%s", response.Code, stream.closed, response.Body.String())
+	}
+	if !strings.Contains(response.Body.String(), ": keep-alive\n\n") || !strings.HasSuffix(response.Body.String(), "data: [DONE]\n\n") {
+		t.Fatalf("missing keepalive or terminal marker: %q", response.Body.String())
 	}
 }
 

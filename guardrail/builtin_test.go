@@ -54,3 +54,22 @@ func TestBuiltinsRejectUnknownOrInvalidConfiguration(t *testing.T) {
 		}
 	}
 }
+
+func TestPhraseGuardrailCoversNativeTextCompletionInputOutputAndStream(t *testing.T) {
+	checker, err := (PhraseFactory{}).Build(catalog.Guardrail{Config: json.RawMessage(`{"mode":"deny","patterns":["SECRET"]}`)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := contract.Request{TextCompletion: &contract.TextCompletionRequest{Prompt: contract.CompletionPrompt{Texts: []string{"secret input"}}}}
+	if decision, err := checker.CheckInput(context.Background(), request); err != nil || decision.Allowed {
+		t.Fatalf("completion input decision=%#v err=%v", decision, err)
+	}
+	response := contract.Response{TextCompletion: &contract.TextCompletionResponse{Choices: []contract.TextCompletionChoice{{Text: "secret output"}}}}
+	if decision, err := checker.CheckOutput(context.Background(), request, response); err != nil || decision.Allowed {
+		t.Fatalf("completion output decision=%#v err=%v", decision, err)
+	}
+	event := contract.StreamEvent{TextCompletion: &contract.TextCompletionDelta{Text: "secret stream"}}
+	if decision, err := checker.CheckStream(context.Background(), request, event); err != nil || decision.Allowed {
+		t.Fatalf("completion stream decision=%#v err=%v", decision, err)
+	}
+}

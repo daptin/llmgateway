@@ -27,6 +27,7 @@ type requestMaterial struct {
 	PublicModel     string
 	MaxOutputTokens int64
 	Chat            *contract.ChatRequest
+	TextCompletion  *contract.TextCompletionRequest
 	Responses       *contract.ResponsesRequest
 	Embeddings      *contract.EmbeddingsRequest
 }
@@ -39,9 +40,13 @@ func Eligible(model catalog.Model, request contract.Request, guardrailsStable bo
 	case contract.OperationEmbeddings:
 		return true
 	case contract.OperationChat:
-		return request.Chat != nil && request.Chat.N == 1 && request.Chat.Temperature != nil && *request.Chat.Temperature == 0 && len(request.Chat.Tools) == 0
+		return request.Chat != nil && request.Chat.N == 1 && request.Chat.Temperature != nil && *request.Chat.Temperature == 0 &&
+			len(request.Chat.Tools) == 0 && (request.Chat.Store == nil || !*request.Chat.Store)
 	case contract.OperationResponses:
 		return request.Responses != nil && len(request.Responses.Tools) == 0
+	case contract.OperationTextCompletion:
+		return request.TextCompletion != nil && request.TextCompletion.N == 1 && request.TextCompletion.BestOf == 1 &&
+			request.TextCompletion.Temperature != nil && *request.TextCompletion.Temperature == 0
 	default:
 		return false
 	}
@@ -50,7 +55,8 @@ func Eligible(model catalog.Model, request contract.Request, guardrailsStable bo
 func Key(revision uint64, model catalog.Model, principal contract.Principal, request contract.Request) (string, error) {
 	material := keyMaterial{
 		Revision: revision, ModelID: model.ID,
-		Request: requestMaterial{Operation: request.Operation, PublicModel: request.PublicModel, MaxOutputTokens: request.MaxOutputTokens, Chat: request.Chat, Responses: request.Responses, Embeddings: request.Embeddings},
+		Request: requestMaterial{Operation: request.Operation, PublicModel: request.PublicModel, MaxOutputTokens: request.MaxOutputTokens,
+			Chat: request.Chat, TextCompletion: request.TextCompletion, Responses: request.Responses, Embeddings: request.Embeddings},
 	}
 	if !model.Capabilities["public_cache"] {
 		material.Principal = &principalMaterial{KeyID: principal.KeyID, OwnerID: principal.OwnerID, TeamID: principal.TeamID}

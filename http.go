@@ -23,6 +23,8 @@ func (e *Engine) Handler(options HTTPOptions) (http.Handler, error) {
 	}
 	mux := http.NewServeMux()
 	mux.Handle("/v1/", protocolHandler)
+	mux.Handle("/ocr", protocolHandler)
+	mux.Handle("/rerank", protocolHandler)
 	mux.HandleFunc("GET /healthz", func(response http.ResponseWriter, _ *http.Request) {
 		writeStatus(response, http.StatusOK, e.Status())
 	})

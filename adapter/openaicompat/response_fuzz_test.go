@@ -12,6 +12,7 @@ func FuzzDecodeProviderResponseDoesNotPanic(f *testing.F) {
 	for _, seed := range []string{
 		`{"id":"chat","choices":[{"message":{"role":"assistant","content":"ok"}}]}`,
 		`{"data":[{"index":0,"embedding":[0.1,0.2]}]}`,
+		`{"id":"resp","object":"response.compaction","created_at":1,"output":[{"type":"compaction","id":"cmp","encrypted_content":"opaque"}]}`,
 		`{"data":[{}]}`,
 		`{`,
 	} {
@@ -21,8 +22,11 @@ func FuzzDecodeProviderResponseDoesNotPanic(f *testing.F) {
 		for _, operation := range []contract.Operation{
 			contract.OperationChat,
 			contract.OperationResponses,
+			contract.OperationResponseCompact,
 			contract.OperationEmbeddings,
 			contract.OperationImageGeneration,
+			contract.OperationImageEdit,
+			contract.OperationImageVariation,
 		} {
 			_, _ = decodeResponse(operation, payload)
 		}

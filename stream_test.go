@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,34 @@ func TestStreamCompletionFailureCannotFallThroughToCancellation(t *testing.T) {
 	}
 	if state := metering.State("stream-terminal-failure"); state != "held" {
 		t.Fatalf("completion failure changed reservation to %q", state)
+	}
+}
+
+func TestNativeTextCompletionIsASemanticFirstStreamEvent(t *testing.T) {
+	document := testDocument()
+	document.Models[0].Operations = []contract.Operation{contract.OperationTextCompletion}
+	document.Deployments[0].Operations = []contract.Operation{contract.OperationTextCompletion}
+	provider := testkit.NewFaultAdapter(adapter.Capabilities{
+		Operations: map[contract.Operation]bool{contract.OperationTextCompletion: true}, Features: map[string]bool{"streaming": true},
+	}, testkit.AdapterStep{Events: []contract.StreamEvent{
+		{Type: "content_delta", TextCompletion: &contract.TextCompletionDelta{ID: "cmpl", Text: "hello"}},
+		{Type: "finish", TextCompletion: &contract.TextCompletionDelta{ID: "cmpl", FinishReason: "stop"},
+			Usage: &contract.Usage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}, Terminal: true},
+	}})
+	stream, err := streamEngine(t, document, provider, testkit.NewMeteringRecorder()).Stream(context.Background(), contract.Principal{}, contract.Request{
+		ID: "completion-stream", Operation: contract.OperationTextCompletion, PublicModel: "model", Stream: true,
+		TextCompletion: &contract.TextCompletionRequest{Prompt: contract.CompletionPrompt{Texts: []string{"prompt"}}, N: 1, BestOf: 1, MaxTokens: 2},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := stream.Next(context.Background())
+	if err != nil || first.TextCompletion == nil || first.TextCompletion.Text != "hello" {
+		t.Fatalf("first event=%#v err=%v", first, err)
+	}
+	terminal, err := stream.Next(context.Background())
+	if err != nil || !terminal.Terminal {
+		t.Fatalf("terminal event=%#v err=%v", terminal, err)
 	}
 }
 
@@ -409,7 +438,7 @@ func TestStreamConservativelySettlesMissingProviderUsage(t *testing.T) {
 		t.Fatal(err)
 	}
 	completion, ok := store.Completion(request.ID)
-	if !ok || completion.Usage.TotalTokens != 18 || !completion.Usage.Estimated || len(completion.Attempts) != 1 || completion.Attempts[0].Usage != completion.Usage {
+	if !ok || completion.Usage.TotalTokens != 18 || !completion.Usage.Estimated || len(completion.Attempts) != 1 || !reflect.DeepEqual(completion.Attempts[0].Usage, completion.Usage) {
 		t.Fatalf("completion = %+v, present=%v", completion, ok)
 	}
 }

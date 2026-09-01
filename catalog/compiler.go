@@ -323,11 +323,9 @@ func validateDeployment(deployment Deployment, models map[contract.ID]Model, pro
 			return fmt.Errorf("deployment %q operation %q is not declared by model", deployment.ID, operation)
 		}
 	}
-	for _, value := range []int64{deployment.Pricing.InputMicrosPerMillion, deployment.Pricing.OutputMicrosPerMillion,
-		deployment.Pricing.CacheReadMicrosPerMillion, deployment.Pricing.CacheWriteMicrosPerMillion,
-		deployment.Pricing.ReasoningMicrosPerMillion} {
-		if value < 0 {
-			return fmt.Errorf("deployment %q pricing cannot be negative", deployment.ID)
+	for name, value := range deployment.Pricing.Rates {
+		if !contract.ValidMeasureName(name) || name == "cost_micros" || value < 0 {
+			return fmt.Errorf("deployment %q pricing measure or rate is invalid", deployment.ID)
 		}
 	}
 	return nil

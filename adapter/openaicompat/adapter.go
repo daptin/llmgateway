@@ -76,7 +76,7 @@ func (f Factory) Build(_ context.Context, provider catalog.Provider, secret adap
 	}
 	parameters := providerParameters{}
 	if len(bytes.TrimSpace(provider.Parameters)) > 0 && !bytes.Equal(bytes.TrimSpace(provider.Parameters), []byte("{}")) {
-		if err := decodeStrict(provider.Parameters, &parameters); err != nil {
+		if err := jsonx.DecodeOne(bytes.NewReader(provider.Parameters), &parameters); err != nil {
 			return nil, fmt.Errorf("invalid OpenAI-compatible provider parameters: %w", err)
 		}
 	}
@@ -117,10 +117,15 @@ func (f Factory) Build(_ context.Context, provider catalog.Provider, secret adap
 
 func (a *Adapter) Capabilities() adapter.Capabilities {
 	return adapter.Capabilities{Operations: map[contract.Operation]bool{
-		contract.OperationChat: true, contract.OperationResponses: true,
+		contract.OperationChat: true, contract.OperationTextCompletion: true, contract.OperationResponses: true, contract.OperationResponseCompact: true,
 		contract.OperationEmbeddings: true, contract.OperationImageGeneration: true,
+		contract.OperationImageEdit: true, contract.OperationImageVariation: true,
+		contract.OperationModeration: true, contract.OperationRerank: true,
+		contract.OperationAudioSpeech: true, contract.OperationTranscription: true, contract.OperationTranslation: true,
+		contract.OperationSearch: true,
+		contract.OperationOCR:    true,
 	}, Features: map[string]bool{
-		"audio": true, "dimensions": true, "json_schema": true, "logprobs": true,
+		"audio": true, "dimensions": true, "files": true, "json_schema": true, "logprobs": true,
 		"parallel_tools": true, "penalties": true, "reasoning": true, "streaming": true,
 		"token_ids": true, "tools": true, "vision": true,
 	}}
@@ -146,11 +151,11 @@ func (a *Adapter) Invoke(ctx context.Context, deployment catalog.Deployment, req
 	if request.Stream {
 		return contract.Response{}, invalidRequest("streaming requests must use Stream", nil)
 	}
-	body, path, err := encodeRequest(deployment, request)
+	encoded, err := encodeRequest(deployment, request)
 	if err != nil {
 		return contract.Response{}, err
 	}
-	response, err := a.do(ctx, deployment, path, body)
+	response, err := a.do(ctx, deployment, encoded)
 	if err != nil {
 		return contract.Response{}, err
 	}
@@ -162,7 +167,12 @@ func (a *Adapter) Invoke(ctx context.Context, deployment catalog.Deployment, req
 	if err != nil {
 		return contract.Response{}, providerFailure("upstream response exceeded the configured bound", err)
 	}
-	decoded, err := decodeResponse(request.Operation, payload)
+	var decoded contract.Response
+	if request.Operation == contract.OperationAudioSpeech || request.Operation == contract.OperationTranscription || request.Operation == contract.OperationTranslation {
+		decoded, err = decodeAudioResponse(request, payload, response.Header.Get("Content-Type"))
+	} else {
+		decoded, err = decodeResponse(request.Operation, payload)
+	}
 	if err != nil {
 		return contract.Response{}, err
 	}
@@ -171,28 +181,64 @@ func (a *Adapter) Invoke(ctx context.Context, deployment catalog.Deployment, req
 		if request.Chat.N > 0 && len(decoded.Chat.Choices) != request.Chat.N {
 			return contract.Response{}, providerFailure("upstream returned the wrong number of chat choices", nil)
 		}
+	case contract.OperationTextCompletion:
+		expected := request.TextCompletion.N * (len(request.TextCompletion.Prompt.Texts) + len(request.TextCompletion.Prompt.Tokens))
+		if len(decoded.TextCompletion.Choices) != expected {
+			return contract.Response{}, providerFailure("upstream returned the wrong number of text completion choices", nil)
+		}
 	case contract.OperationEmbeddings:
 		expected := len(request.Embeddings.Input.Texts) + len(request.Embeddings.Input.Tokens)
 		if len(decoded.Embeddings.Data) != expected {
 			return contract.Response{}, providerFailure("upstream returned the wrong number of embeddings", nil)
 		}
 	case contract.OperationImageGeneration:
-		if request.ImageGeneration.N > 0 && len(decoded.ImageGeneration.Data) != request.ImageGeneration.N {
+		if request.ImageGeneration.N > 0 && len(decoded.Images.Data) != request.ImageGeneration.N {
 			return contract.Response{}, providerFailure("upstream returned the wrong number of images", nil)
+		}
+	case contract.OperationImageEdit:
+		if request.ImageEdit.N > 0 && len(decoded.Images.Data) != request.ImageEdit.N {
+			return contract.Response{}, providerFailure("upstream returned the wrong number of edited images", nil)
+		}
+	case contract.OperationImageVariation:
+		if request.ImageVariation.N > 0 && len(decoded.Images.Data) != request.ImageVariation.N {
+			return contract.Response{}, providerFailure("upstream returned the wrong number of image variations", nil)
+		}
+	case contract.OperationModeration:
+		if len(decoded.Moderation.Results) != len(request.Moderation.Input) {
+			return contract.Response{}, providerFailure("upstream returned the wrong number of moderation results", nil)
+		}
+	case contract.OperationRerank:
+		if len(decoded.Rerank.Results) > request.Rerank.TopN {
+			return contract.Response{}, providerFailure("upstream returned too many rerank results", nil)
+		}
+		seen := make(map[int]bool, len(decoded.Rerank.Results))
+		for _, result := range decoded.Rerank.Results {
+			if result.Index >= len(request.Rerank.Documents) || seen[result.Index] {
+				return contract.Response{}, providerFailure("upstream rerank result references an invalid document", nil)
+			}
+			seen[result.Index] = true
+		}
+	case contract.OperationSearch:
+		if len(decoded.Search.Results) > request.Search.MaxResults {
+			return contract.Response{}, providerFailure("upstream returned too many search results", nil)
+		}
+	case contract.OperationOCR:
+		if request.OCR.Pages != nil && len(decoded.OCR.Pages) > len(request.OCR.Pages) {
+			return contract.Response{}, providerFailure("upstream returned too many OCR pages", nil)
 		}
 	}
 	return decoded, nil
 }
 
 func (a *Adapter) Stream(ctx context.Context, deployment catalog.Deployment, request contract.Request) (adapter.Stream, error) {
-	if !request.Stream || (request.Operation != contract.OperationChat && request.Operation != contract.OperationResponses) {
+	if !request.Stream || (request.Operation != contract.OperationChat && request.Operation != contract.OperationTextCompletion && request.Operation != contract.OperationResponses) {
 		return nil, invalidRequest("operation does not support streaming", nil)
 	}
-	body, path, err := encodeRequest(deployment, request)
+	encoded, err := encodeRequest(deployment, request)
 	if err != nil {
 		return nil, err
 	}
-	response, err := a.do(ctx, deployment, path, body)
+	response, err := a.do(ctx, deployment, encoded)
 	if err != nil {
 		return nil, err
 	}
@@ -245,27 +291,27 @@ func (a *Adapter) HealthCheck(ctx context.Context, deployment catalog.Deployment
 	return nil
 }
 
-func (a *Adapter) do(ctx context.Context, deployment catalog.Deployment, path string, body []byte) (*http.Response, error) {
+func (a *Adapter) do(ctx context.Context, deployment catalog.Deployment, encoded encodedRequest) (*http.Response, error) {
 	if err := a.ValidateDeployment(deployment); err != nil {
 		return nil, invalidRequest(err.Error(), err)
 	}
-	if path == "/images/generations" && a.parameters.ImageGenerationPath != "" {
-		path = a.parameters.ImageGenerationPath
+	if encoded.path == "/images/generations" && a.parameters.ImageGenerationPath != "" {
+		encoded.path = a.parameters.ImageGenerationPath
 	}
 	endpoint := *a.baseURL
-	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + path
+	endpoint.Path = strings.TrimRight(endpoint.Path, "/") + encoded.path
 	requestContext := ctx
 	cancel := func() {}
 	if deployment.RequestTimeout > 0 {
 		requestContext, cancel = context.WithTimeout(ctx, deployment.RequestTimeout)
 	}
-	request, err := http.NewRequestWithContext(requestContext, http.MethodPost, endpoint.String(), bytes.NewReader(body))
+	request, err := http.NewRequestWithContext(requestContext, http.MethodPost, endpoint.String(), bytes.NewReader(encoded.body))
 	if err != nil {
 		cancel()
 		return nil, invalidRequest("failed to construct upstream request", err)
 	}
-	a.setHeaders(request, "application/json")
-	request.Header.Set("Content-Type", "application/json")
+	a.setHeaders(request, encoded.accept)
+	request.Header.Set("Content-Type", encoded.contentType)
 	response, err := a.clientFor(deployment.ConnectTimeout).Do(request)
 	if err != nil {
 		cancel()
@@ -318,7 +364,6 @@ func (a *Adapter) clientFor(connectTimeout time.Duration) *http.Client {
 		clone := netpolicy.CloneTransport(base, connectTimeout, a.allowPrivate)
 		if connectTimeout > 0 {
 			clone.TLSHandshakeTimeout = connectTimeout
-			clone.ResponseHeaderTimeout = connectTimeout
 		}
 		transport = clone
 		a.ownedTransports = append(a.ownedTransports, clone)
@@ -349,8 +394,4 @@ func readBounded(reader io.Reader, maximum int64) ([]byte, error) {
 		return nil, errors.New("response body is too large")
 	}
 	return payload, nil
-}
-
-func decodeStrict(payload []byte, destination any) error {
-	return jsonx.DecodeOne(bytes.NewReader(payload), destination)
 }

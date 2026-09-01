@@ -25,6 +25,8 @@
       "cases": [
         {"name":"chat","feature":"chat","model":"openai/gpt-4o-mini"},
         {"name":"chat-stream","feature":"chat_stream","model":"openai/gpt-4o-mini"},
+        {"name":"text-completion","feature":"text_completion","model":"openai/gpt-4o-mini"},
+        {"name":"text-completion-stream","feature":"text_completion_stream","model":"openai/gpt-4o-mini"},
         {"name":"tools","feature":"chat_tools","model":"openai/gpt-4o-mini"},
         {"name":"structured","feature":"chat_structured","model":"openai/gpt-4o-mini"},
         {"name":"vision","feature":"chat_vision","model":"openai/gpt-4o-mini"},
@@ -34,6 +36,8 @@
         {"name":"embedding-token-arrays","feature":"embedding_token_arrays","model":"openai/text-embedding-3-small"},
         {"name":"responses","feature":"responses","model":"openai/gpt-4o"},
         {"name":"responses-stream","feature":"responses_stream","model":"openai/gpt-4o"},
+        {"name":"rerank","feature":"rerank","model":"cohere/rerank-v3.5"},
+        {"name":"speech","feature":"audio_speech","model":"fish-audio/s2.1-pro-free:free"},
         {"name":"image","feature":"image","model":"bytedance-seed/seedream-4.5"}
       ]
     },

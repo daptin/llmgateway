@@ -11,13 +11,13 @@ import (
 	"testing"
 )
 
-func TestModuleHasNoHostOrMeteringPolicyOwnership(t *testing.T) {
+func TestModuleHasNoHostDependencies(t *testing.T) {
 	forbiddenImports := []string{
 		"github.com/daptin/daptin", "github.com/gin-gonic/gin", "github.com/jmoiron/sqlx",
 		"github.com/doug-martin/goqu", "github.com/buraksezer/olric", "database/sql",
 	}
-	forbiddenSymbols := map[string]bool{
-		"Limit": true, "Policy": true, "PolicyBinding": true, "PolicyBindings": true, "LimitReservations": true,
+	forbiddenMeteringSymbols := map[string]bool{
+		"Policy": true, "PolicyBinding": true, "PolicyBindings": true, "LimitReservations": true,
 		"ParsePolicy": true, "BuildReservations": true, "metricAmount": true, "windowBounds": true,
 	}
 	err := filepath.WalkDir(".", func(path string, entry fs.DirEntry, walkErr error) error {
@@ -58,16 +58,16 @@ func TestModuleHasNoHostOrMeteringPolicyOwnership(t *testing.T) {
 					}
 				}
 			case *ast.TypeSpec:
-				if forbiddenSymbols[typed.Name.Name] {
+				if forbiddenMeteringSymbols[typed.Name.Name] {
 					t.Errorf("%s declares host-owned metering type %s", path, typed.Name.Name)
 				}
 			case *ast.FuncDecl:
-				if forbiddenSymbols[typed.Name.Name] {
+				if forbiddenMeteringSymbols[typed.Name.Name] {
 					t.Errorf("%s declares host-owned metering function %s", path, typed.Name.Name)
 				}
 			case *ast.Field:
 				for _, name := range typed.Names {
-					if forbiddenSymbols[name.Name] {
+					if forbiddenMeteringSymbols[name.Name] {
 						t.Errorf("%s declares host-owned metering field %s", path, name.Name)
 					}
 				}

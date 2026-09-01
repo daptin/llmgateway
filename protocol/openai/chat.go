@@ -34,6 +34,8 @@ type chatRequest struct {
 	TopLogprobs         *int            `json:"top_logprobs,omitempty"`
 	ParallelToolCalls   *bool           `json:"parallel_tool_calls,omitempty"`
 	ReasoningEffort     string          `json:"reasoning_effort,omitempty"`
+	Store               *bool           `json:"store,omitempty"`
+	PromptCacheKey      string          `json:"prompt_cache_key,omitempty"`
 }
 
 type streamOptions struct {
@@ -184,7 +186,8 @@ func canonicalChat(id contract.ID, wire chatRequest, requestBytes int64) (contra
 	}
 	chat := &contract.ChatRequest{N: n, Temperature: wire.Temperature, TopP: wire.TopP, FrequencyPenalty: wire.FrequencyPenalty,
 		PresencePenalty: wire.PresencePenalty, MaxCompletionTokens: maximum, User: wire.User, Seed: wire.Seed, Logprobs: wire.Logprobs,
-		ParallelToolCalls: wire.ParallelToolCalls, ReasoningEffort: wire.ReasoningEffort}
+		ParallelToolCalls: wire.ParallelToolCalls, ReasoningEffort: wire.ReasoningEffort, Store: wire.Store,
+		PromptCacheKey: wire.PromptCacheKey}
 	if wire.TopLogprobs != nil {
 		if *wire.TopLogprobs < 0 || *wire.TopLogprobs > 20 || !wire.Logprobs {
 			return contract.Request{}, false, gatewayError(contract.ErrorInvalidRequest, "top_logprobs requires logprobs and must be between 0 and 20", http.StatusBadRequest, false, nil)
@@ -374,29 +377,29 @@ func convertStop(raw json.RawMessage) ([]string, error) {
 }
 
 func (h *Handler) streamChat(response http.ResponseWriter, request *http.Request, principal contract.Principal, canonical contract.Request, includeUsage bool) {
-	flusher, ok := response.(http.Flusher)
-	if !ok {
-		writeError(response, gatewayError(contract.ErrorInternal, "streaming is unavailable", http.StatusInternalServerError, false, nil), canonical.ID)
-		return
-	}
-	stream, err := h.engine.Stream(request.Context(), principal, canonical)
+	session, err := h.startSSE(response, request, principal, canonical)
 	if err != nil {
-		writeError(response, err, canonical.ID)
+		if session == nil {
+			writeError(response, err, canonical.ID)
+		} else {
+			defer session.Close()
+			if session.Active() {
+				_, _ = fmt.Fprintf(response, "data: %s\n\n", encodeErrorEvent(err, canonical.ID))
+				_, _ = io.WriteString(response, "data: [DONE]\n\n")
+				session.flusher.Flush()
+			}
+		}
 		return
 	}
-	defer stream.Close(request.Context())
-	response.Header().Set("Content-Type", "text/event-stream")
-	response.Header().Set("Cache-Control", "no-cache")
-	response.Header().Set("X-Accel-Buffering", "no")
-	response.Header().Set("X-Request-ID", string(canonical.ID))
+	defer session.Close()
 	for {
-		event, nextErr := stream.Next(request.Context())
+		event, nextErr := session.Next()
 		if nextErr != nil {
 			if errors.Is(nextErr, io.EOF) {
 				if _, writeErr := io.WriteString(response, "data: [DONE]\n\n"); writeErr != nil {
 					return
 				}
-				flusher.Flush()
+				session.flusher.Flush()
 				return
 			}
 			encoded := encodeErrorEvent(nextErr, canonical.ID)
@@ -406,7 +409,7 @@ func (h *Handler) streamChat(response http.ResponseWriter, request *http.Request
 			if _, writeErr := io.WriteString(response, "data: [DONE]\n\n"); writeErr != nil {
 				return
 			}
-			flusher.Flush()
+			session.flusher.Flush()
 			return
 		}
 		if event.Usage != nil && !includeUsage && event.Chat == nil {
@@ -414,7 +417,7 @@ func (h *Handler) streamChat(response http.ResponseWriter, request *http.Request
 				if _, writeErr := io.WriteString(response, "data: [DONE]\n\n"); writeErr != nil {
 					return
 				}
-				flusher.Flush()
+				session.flusher.Flush()
 				return
 			}
 			continue
@@ -427,18 +430,18 @@ func (h *Handler) streamChat(response http.ResponseWriter, request *http.Request
 			if _, writeErr := io.WriteString(response, "data: [DONE]\n\n"); writeErr != nil {
 				return
 			}
-			flusher.Flush()
+			session.flusher.Flush()
 			return
 		}
 		if _, writeErr := fmt.Fprintf(response, "data: %s\n\n", encoded); writeErr != nil {
 			return
 		}
-		flusher.Flush()
+		session.flusher.Flush()
 		if event.Terminal {
 			if _, writeErr := io.WriteString(response, "data: [DONE]\n\n"); writeErr != nil {
 				return
 			}
-			flusher.Flush()
+			session.flusher.Flush()
 			return
 		}
 	}
