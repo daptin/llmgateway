@@ -48,21 +48,24 @@ func TestLiveProviderMatrix(t *testing.T) {
 		provider := provider
 		t.Run(provider.Name, func(t *testing.T) {
 			key := os.Getenv(provider.APIKeyEnv)
-			if key == "" {
-				t.Fatalf("%s is required for the live provider gate", provider.APIKeyEnv)
+			var upstream *Adapter
+			if key != "" {
+				built, err := (Factory{}).Build(context.Background(), catalog.Provider{
+					ID: contract.ID(provider.Name), Name: provider.Name, Type: provider.Name,
+					SecretRef: provider.APIKeyEnv, Parameters: provider.ProviderParameters, Enabled: true,
+				}, baseadapter.NewSecret([]byte(key)))
+				if err != nil {
+					t.Fatal(err)
+				}
+				upstream = built.(*Adapter)
+				defer upstream.CloseIdleConnections()
 			}
-			built, err := (Factory{}).Build(context.Background(), catalog.Provider{
-				ID: contract.ID(provider.Name), Name: provider.Name, Type: provider.Name,
-				SecretRef: provider.APIKeyEnv, Parameters: provider.ProviderParameters, Enabled: true,
-			}, baseadapter.NewSecret([]byte(key)))
-			if err != nil {
-				t.Fatal(err)
-			}
-			upstream := built.(*Adapter)
-			defer upstream.CloseIdleConnections()
 			for _, testCase := range provider.Cases {
 				testCase := testCase
 				t.Run(testCase.Name+"/"+testCase.Model, func(t *testing.T) {
+					if upstream == nil {
+						t.Fatalf("%s is required for the live provider gate", provider.APIKeyEnv)
+					}
 					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 					defer cancel()
 					result, err := runLiveCase(ctx, upstream, testCase)
@@ -256,9 +259,8 @@ func runLiveCase(ctx context.Context, upstream *Adapter, testCase liveCase) (liv
 }
 
 func liveChatRequest(_ string, feature string) contract.Request {
-	zero := 0.0
 	message := contract.Message{Role: "user", Content: []contract.ContentPart{{Type: "text", Text: "Reply with the single word pong."}}}
-	request := contract.Request{Operation: contract.OperationChat, MaxOutputTokens: 64, Chat: &contract.ChatRequest{Messages: []contract.Message{message}, N: 1, Temperature: &zero, MaxCompletionTokens: 64}}
+	request := contract.Request{Operation: contract.OperationChat, MaxOutputTokens: 64, Chat: &contract.ChatRequest{Messages: []contract.Message{message}, N: 1, MaxCompletionTokens: 64}}
 	switch feature {
 	case "chat_tools":
 		request.Chat.Messages[0].Content[0].Text = "Call get_weather for Pune. Do not answer directly."
