@@ -5,6 +5,7 @@ import "encoding/json"
 type ResponsesRequest struct {
 	Instructions         string
 	Input                []ResponseInputItem
+	Include              []string
 	Tools                []Tool
 	ToolChoice           *ToolChoice
 	TextFormat           *ResponseFormat
@@ -25,6 +26,7 @@ type ResponsesRequest struct {
 }
 
 type ResponseInputItem struct {
+	ID               string
 	Type             string
 	Role             string
 	Content          []ContentPart

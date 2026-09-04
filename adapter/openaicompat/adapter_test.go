@@ -376,12 +376,17 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 				t.Fatalf("Responses tool was not flat: %#v", tool)
 			}
 			reasoning := body["reasoning"].(map[string]any)
+			include := body["include"].([]any)
 			if body["temperature"] != 0.4 || body["top_p"] != 0.8 || body["parallel_tool_calls"] != false || reasoning["effort"] != "low" || reasoning["summary"] != "concise" ||
 				body["prompt_cache_key"] != "tenant-thread" || body["safety_identifier"] != "safe-user" || body["service_tier"] != "priority" ||
-				body["truncation"] != "disabled" || body["user"] != "legacy-user" || body["top_logprobs"] != float64(3) || body["store"] != false {
+				body["truncation"] != "disabled" || body["user"] != "legacy-user" || body["top_logprobs"] != float64(3) || body["store"] != false ||
+				len(include) != 1 || include[0] != "reasoning.encrypted_content" {
 				t.Fatalf("Responses controls were not preserved: %#v", body)
 			}
 			content := body["input"].([]any)[0].(map[string]any)["content"].([]any)
+			if body["input"].([]any)[0].(map[string]any)["id"] != "msg_input_1" {
+				t.Fatalf("Responses input id was not preserved: %#v", body["input"])
+			}
 			file := content[1].(map[string]any)
 			if file["type"] != "input_file" || file["filename"] != "brief.pdf" || file["file_data"] != "data:application/pdf;base64,cGRm" {
 				t.Fatalf("Responses inline file was not preserved: %#v", content)
@@ -405,14 +410,14 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 		check   func(contract.Response) bool
 	}{
 		{name: "responses", request: contract.Request{Operation: contract.OperationResponses, Responses: &contract.ResponsesRequest{
-			Input: []contract.ResponseInputItem{{Type: "message", Role: "user", Content: []contract.ContentPart{
+			Input: []contract.ResponseInputItem{{ID: "msg_input_1", Type: "message", Role: "user", Content: []contract.ContentPart{
 				{Type: "input_text", Text: "hi"},
 				{Type: "input_file", File: &contract.InputFile{Data: "data:application/pdf;base64,cGRm", Filename: "brief.pdf"}},
 			}}},
 			Tools:       []contract.Tool{{Type: "function", Function: contract.FunctionDefinition{Name: "weather", Parameters: json.RawMessage(`{"type":"object"}`)}}},
 			Temperature: &temperature, TopP: &topP, ParallelToolCalls: &parallel, ReasoningEffort: "low", ReasoningSummary: "concise",
 			PromptCacheKey: "tenant-thread", SafetyIdentifier: "safe-user", ServiceTier: "priority", Truncation: "disabled",
-			User: "legacy-user", TopLogprobs: &topLogprobs,
+			User: "legacy-user", TopLogprobs: &topLogprobs, Include: []string{"reasoning.encrypted_content"},
 		}}, check: func(value contract.Response) bool {
 			return value.Responses != nil && value.Responses.Output[0].Status == "" && value.Responses.Output[0].Summary[0].Text == "brief" &&
 				value.Responses.Output[0].Content[0].Text == "worked" && value.Responses.Output[1].Content[0].Text == "hello"

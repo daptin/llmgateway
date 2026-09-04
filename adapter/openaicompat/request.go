@@ -178,7 +178,7 @@ func (parameters deploymentParameters) forOperation(operation contract.Operation
 var canonicalRequestFields = map[contract.Operation]map[string]struct{}{
 	contract.OperationChat:            fieldSet("model", "messages", "stream", "stream_options", "tools", "tool_choice", "response_format", "n", "temperature", "top_p", "frequency_penalty", "presence_penalty", "max_completion_tokens", "stop", "user", "seed", "logprobs", "top_logprobs", "parallel_tool_calls", "reasoning_effort", "store", "prompt_cache_key"),
 	contract.OperationTextCompletion:  fieldSet("model", "prompt", "best_of", "echo", "frequency_penalty", "logit_bias", "logprobs", "max_tokens", "n", "presence_penalty", "seed", "stop", "stream", "stream_options", "suffix", "temperature", "top_p", "user"),
-	contract.OperationResponses:       fieldSet("model", "input", "stream", "store", "background", "instructions", "tools", "tool_choice", "text", "max_output_tokens", "temperature", "top_p", "parallel_tool_calls", "reasoning", "prompt_cache_key", "safety_identifier", "service_tier", "truncation", "user", "top_logprobs", "previous_response_id"),
+	contract.OperationResponses:       fieldSet("model", "input", "stream", "store", "background", "instructions", "tools", "tool_choice", "text", "max_output_tokens", "temperature", "top_p", "parallel_tool_calls", "reasoning", "include", "prompt_cache_key", "safety_identifier", "service_tier", "truncation", "user", "top_logprobs", "previous_response_id"),
 	contract.OperationResponseCompact: fieldSet("model", "input", "instructions", "previous_response_id", "prompt_cache_key", "prompt_cache_options", "prompt_cache_retention", "service_tier"),
 	contract.OperationEmbeddings:      fieldSet("model", "input", "encoding_format", "dimensions", "user"),
 	contract.OperationImageGeneration: fieldSet("model", "prompt", "n", "response_format", "size", "quality"),
@@ -722,6 +722,9 @@ func encodeResponsesRequest(model string, request contract.Request) map[string]a
 	if responses.Instructions != "" {
 		value["instructions"] = responses.Instructions
 	}
+	if len(responses.Include) > 0 {
+		value["include"] = responses.Include
+	}
 	if len(responses.Tools) > 0 {
 		value["tools"] = encodeResponseTools(responses.Tools)
 	}
@@ -828,6 +831,9 @@ func encodeResponseInput(items []contract.ResponseInputItem) []map[string]any {
 	result := make([]map[string]any, 0, len(items))
 	for _, item := range items {
 		value := map[string]any{"type": item.Type}
+		if item.ID != "" {
+			value["id"] = item.ID
+		}
 		switch item.Type {
 		case "message":
 			value["role"] = item.Role

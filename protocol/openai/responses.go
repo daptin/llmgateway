@@ -15,6 +15,8 @@ import (
 type responsesRequest struct {
 	Model              string             `json:"model"`
 	Input              json.RawMessage    `json:"input"`
+	Include            []string           `json:"include,omitempty"`
+	ClientMetadata     json.RawMessage    `json:"client_metadata,omitempty"`
 	Instructions       string             `json:"instructions,omitempty"`
 	Stream             bool               `json:"stream,omitempty"`
 	Tools              []responseTool     `json:"tools,omitempty"`
@@ -68,6 +70,7 @@ type responseTextFormat struct {
 }
 
 type responseInputItem struct {
+	ID               string          `json:"id,omitempty"`
 	Type             string          `json:"type,omitempty"`
 	Role             string          `json:"role,omitempty"`
 	Content          json.RawMessage `json:"content,omitempty"`
@@ -114,7 +117,7 @@ func (h *Handler) responses(response http.ResponseWriter, request *http.Request)
 	}
 	var wire responsesRequest
 	if err := decodeStrict(body, &wire); err != nil {
-		writeError(response, gatewayError(contract.ErrorInvalidRequest, "invalid responses request", http.StatusBadRequest, false, err), id)
+		writeError(response, gatewayError(contract.ErrorInvalidRequest, strictJSONErrorMessage("invalid responses request", err), http.StatusBadRequest, false, err), id)
 		return
 	}
 	canonical, err := h.canonicalResponse(id, wire, int64(len(body)))
@@ -219,9 +222,9 @@ func (h *Handler) canonicalResponse(id contract.ID, wire responsesRequest, reque
 	}
 	input, err := convertResponseInput(wire.Input)
 	if err != nil {
-		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid response input", http.StatusBadRequest, false, err)
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, strictJSONErrorMessage("invalid response input", err), http.StatusBadRequest, false, err)
 	}
-	canonical := &contract.ResponsesRequest{Instructions: wire.Instructions, Input: input}
+	canonical := &contract.ResponsesRequest{Instructions: wire.Instructions, Input: input, Include: append([]string(nil), wire.Include...)}
 	for _, tool := range wire.Tools {
 		if tool.Type != "function" || tool.Name == "" || len(tool.Parameters) == 0 {
 			return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid function tool", http.StatusBadRequest, false, nil)
@@ -317,7 +320,10 @@ func convertResponseInput(raw json.RawMessage) ([]contract.ResponseInputItem, er
 		return []contract.ResponseInputItem{{Type: "message", Role: "user", Content: []contract.ContentPart{{Type: "input_text", Text: text}}}}, nil
 	}
 	var items []responseInputItem
-	if err := decodeStrict(trimmed, &items); err != nil || len(items) == 0 {
+	if err := decodeStrict(trimmed, &items); err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
 		return nil, errors.New("input must be a string or non-empty item array")
 	}
 	result := make([]contract.ResponseInputItem, 0, len(items))
@@ -344,22 +350,22 @@ func convertResponseInputItem(item responseInputItem) (contract.ResponseInputIte
 		if err != nil {
 			return contract.ResponseInputItem{}, err
 		}
-		return contract.ResponseInputItem{Type: "message", Role: item.Role, Content: content}, nil
+		return contract.ResponseInputItem{ID: item.ID, Type: "message", Role: item.Role, Content: content}, nil
 	case "function_call":
 		if item.CallID == "" || item.Name == "" || item.Arguments == "" {
 			return contract.ResponseInputItem{}, errors.New("function_call requires call_id, name, and arguments")
 		}
-		return contract.ResponseInputItem{Type: item.Type, CallID: item.CallID, Name: item.Name, Arguments: item.Arguments}, nil
+		return contract.ResponseInputItem{ID: item.ID, Type: item.Type, CallID: item.CallID, Name: item.Name, Arguments: item.Arguments}, nil
 	case "function_call_output":
 		if item.CallID == "" || item.Output == "" {
 			return contract.ResponseInputItem{}, errors.New("function_call_output requires call_id and output")
 		}
-		return contract.ResponseInputItem{Type: item.Type, CallID: item.CallID, Output: item.Output}, nil
+		return contract.ResponseInputItem{ID: item.ID, Type: item.Type, CallID: item.CallID, Output: item.Output}, nil
 	case "compaction":
 		if item.EncryptedContent == "" {
 			return contract.ResponseInputItem{}, errors.New("compaction requires encrypted_content")
 		}
-		return contract.ResponseInputItem{Type: item.Type, EncryptedContent: item.EncryptedContent}, nil
+		return contract.ResponseInputItem{ID: item.ID, Type: item.Type, EncryptedContent: item.EncryptedContent}, nil
 	default:
 		return contract.ResponseInputItem{}, fmt.Errorf("unsupported input item type %q", item.Type)
 	}

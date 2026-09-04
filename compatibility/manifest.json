@@ -80,6 +80,8 @@
       "request_fields": {
         "model": "native",
         "input": "translated",
+        "include": "native",
+        "client_metadata": "ignored",
         "instructions": "translated",
         "stream": "native",
         "tools": "translated",

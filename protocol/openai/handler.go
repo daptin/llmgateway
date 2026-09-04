@@ -332,6 +332,19 @@ func decodeStrict(data []byte, destination any) error {
 	return jsonx.DecodeOne(bytes.NewReader(data), destination)
 }
 
+func strictJSONErrorMessage(message string, err error) string {
+	const unknownFieldPrefix = "json: unknown field \""
+	if err != nil && strings.HasPrefix(err.Error(), unknownFieldPrefix) && strings.HasSuffix(err.Error(), "\"") {
+		field := strings.TrimSuffix(strings.TrimPrefix(err.Error(), unknownFieldPrefix), "\"")
+		return fmt.Sprintf("%s: unsupported field %q", message, field)
+	}
+	var typeError *json.UnmarshalTypeError
+	if errors.As(err, &typeError) && typeError.Field != "" {
+		return fmt.Sprintf("%s: field %q has an invalid type", message, typeError.Field)
+	}
+	return message
+}
+
 func (h *Handler) requestID(request *http.Request) (contract.ID, error) {
 	provided := strings.TrimSpace(request.Header.Get("X-Request-ID"))
 	if provided != "" {

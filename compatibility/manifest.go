@@ -15,6 +15,7 @@ type Support string
 const (
 	Native     Support = "native"
 	Translated Support = "translated"
+	Ignored    Support = "ignored"
 	Rejected   Support = "rejected"
 )
 
@@ -136,7 +137,7 @@ func (m Manifest) Validate() error {
 
 func validSupport(value Support) bool {
 	switch value {
-	case Native, Translated, Rejected:
+	case Native, Translated, Ignored, Rejected:
 		return true
 	default:
 		return false

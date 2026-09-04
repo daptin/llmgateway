@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -181,6 +182,46 @@ func TestResponsesRejectStateAndPreserveTypedInput(t *testing.T) {
 		t.Fatalf("canonical request = %#v", request)
 	}
 	assertJSONEqual(t, response.Body.String(), `{"id":"resp_1","model":"allowed","object":"response","output":[{"content":[{"annotations":[],"text":"sunny","type":"output_text"}],"id":"msg_1","role":"assistant","status":"completed","type":"message"}],"status":"completed","usage":{"input_tokens":5,"input_tokens_details":{"cached_tokens":2},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":1},"total_tokens":6}}`)
+}
+
+func TestResponsesAcceptCodex01532Request(t *testing.T) {
+	body, err := os.ReadFile("testdata/codex-0.153.2-responses-request.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stream := &eventStream{events: []contract.StreamEvent{{
+		Type: "response.completed",
+		Response: &contract.ResponseDelta{ResponseID: "resp_codex", Sequence: 1, Snapshot: &contract.Response{
+			Responses: &contract.ResponsesResponse{ID: "resp_codex", Status: "completed", Output: []contract.ResponseOutputItem{}},
+		}},
+		Terminal: true,
+	}}}
+	engine := &fakeEngine{snapshot: testSnapshot(t), stream: stream}
+	response := perform(testHandler(t, engine, fakeAuthenticator{}), http.MethodPost, "/v1/responses", string(body), "key")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	request := engine.streamRequest
+	if request.Responses == nil || len(request.Responses.Include) != 1 || request.Responses.Include[0] != "reasoning.encrypted_content" ||
+		len(request.Responses.Input) != 1 || request.Responses.Input[0].ID != "msg_codex_1" || request.Responses.PromptCacheKey != "codex-thread" {
+		t.Fatalf("Codex request was not preserved: %#v", request.Responses)
+	}
+}
+
+func TestResponsesStrictErrorsIdentifyUnsupportedFields(t *testing.T) {
+	handler := testHandler(t, &fakeEngine{snapshot: testSnapshot(t)}, fakeAuthenticator{})
+	for _, test := range []struct {
+		body  string
+		field string
+	}{
+		{body: `{"model":"allowed","input":"hello","future_option":true}`, field: "future_option"},
+		{body: `{"model":"allowed","input":[{"type":"message","role":"user","content":"hello","future_item":true}]}`, field: "future_item"},
+	} {
+		response := perform(handler, http.MethodPost, "/v1/responses", test.body, "key")
+		if response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `unsupported field \"`+test.field+`\"`) {
+			t.Fatalf("field-specific error missing: status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
 }
 
 func TestResponsesRejectInvalidSamplingControls(t *testing.T) {
