@@ -59,8 +59,12 @@ type InputFile struct {
 }
 
 type Tool struct {
-	Type     string
-	Function FunctionDefinition
+	Type              string
+	Name              string
+	Description       string
+	Function          FunctionDefinition
+	Tools             []Tool
+	ExternalWebAccess *bool
 }
 
 type FunctionDefinition struct {

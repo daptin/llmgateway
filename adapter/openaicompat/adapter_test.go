@@ -375,6 +375,14 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 			if tool["name"] != "weather" || tool["function"] != nil {
 				t.Fatalf("Responses tool was not flat: %#v", tool)
 			}
+			namespace := body["tools"].([]any)[1].(map[string]any)
+			if namespace["type"] != "namespace" || namespace["name"] != "collaboration" || len(namespace["tools"].([]any)) != 1 {
+				t.Fatalf("Responses namespace was not preserved: %#v", namespace)
+			}
+			webSearch := body["tools"].([]any)[2].(map[string]any)
+			if webSearch["type"] != "web_search" || webSearch["external_web_access"] != true {
+				t.Fatalf("Responses web search was not preserved: %#v", webSearch)
+			}
 			reasoning := body["reasoning"].(map[string]any)
 			include := body["include"].([]any)
 			if body["temperature"] != 0.4 || body["top_p"] != 0.8 || body["parallel_tool_calls"] != false || reasoning["effort"] != "low" || reasoning["summary"] != "concise" ||
@@ -402,7 +410,7 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 	}))
 	defer server.Close()
 	adapter := buildAdapter(t, server, `{"image_generation_path":"/images"}`, Factory{})
-	temperature, topP, parallel := 0.4, 0.8, false
+	temperature, topP, parallel, externalWebAccess := 0.4, 0.8, false, true
 	topLogprobs := 3
 	tests := []struct {
 		name    string
@@ -414,7 +422,11 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 				{Type: "input_text", Text: "hi"},
 				{Type: "input_file", File: &contract.InputFile{Data: "data:application/pdf;base64,cGRm", Filename: "brief.pdf"}},
 			}}},
-			Tools:       []contract.Tool{{Type: "function", Function: contract.FunctionDefinition{Name: "weather", Parameters: json.RawMessage(`{"type":"object"}`)}}},
+			Tools: []contract.Tool{
+				{Type: "function", Function: contract.FunctionDefinition{Name: "weather", Parameters: json.RawMessage(`{"type":"object"}`)}},
+				{Type: "namespace", Name: "collaboration", Tools: []contract.Tool{{Type: "function", Function: contract.FunctionDefinition{Name: "list_agents", Parameters: json.RawMessage(`{"type":"object"}`)}}}},
+				{Type: "web_search", ExternalWebAccess: &externalWebAccess},
+			},
 			Temperature: &temperature, TopP: &topP, ParallelToolCalls: &parallel, ReasoningEffort: "low", ReasoningSummary: "concise",
 			PromptCacheKey: "tenant-thread", SafetyIdentifier: "safe-user", ServiceTier: "priority", Truncation: "disabled",
 			User: "legacy-user", TopLogprobs: &topLogprobs, Include: []string{"reasoning.encrypted_content"},

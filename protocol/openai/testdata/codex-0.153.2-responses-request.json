@@ -17,6 +17,23 @@
       "name": "noop",
       "description": "A test tool",
       "parameters": {"type": "object", "properties": {}}
+    },
+    {
+      "type": "namespace",
+      "name": "collaboration",
+      "description": "Collaboration tools",
+      "tools": [
+        {
+          "type": "function",
+          "name": "list_agents",
+          "description": "List agents",
+          "parameters": {"type": "object", "properties": {}}
+        }
+      ]
+    },
+    {
+      "type": "web_search",
+      "external_web_access": true
     }
   ],
   "tool_choice": "auto",

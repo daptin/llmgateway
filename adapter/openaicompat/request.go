@@ -808,12 +808,27 @@ func encodeResponseCompactionRequest(model string, request contract.Request) map
 func encodeResponseTools(tools []contract.Tool) []map[string]any {
 	result := make([]map[string]any, 0, len(tools))
 	for _, tool := range tools {
-		value := map[string]any{"type": tool.Type, "name": tool.Function.Name, "parameters": json.RawMessage(tool.Function.Parameters)}
-		if tool.Function.Description != "" {
-			value["description"] = tool.Function.Description
-		}
-		if tool.Function.Strict != nil {
-			value["strict"] = *tool.Function.Strict
+		value := map[string]any{"type": tool.Type}
+		switch tool.Type {
+		case "function":
+			value["name"] = tool.Function.Name
+			value["parameters"] = json.RawMessage(tool.Function.Parameters)
+			if tool.Function.Description != "" {
+				value["description"] = tool.Function.Description
+			}
+			if tool.Function.Strict != nil {
+				value["strict"] = *tool.Function.Strict
+			}
+		case "namespace":
+			value["name"] = tool.Name
+			if tool.Description != "" {
+				value["description"] = tool.Description
+			}
+			value["tools"] = encodeResponseTools(tool.Tools)
+		case "web_search":
+			if tool.ExternalWebAccess != nil {
+				value["external_web_access"] = *tool.ExternalWebAccess
+			}
 		}
 		result = append(result, value)
 	}

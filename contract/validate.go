@@ -148,7 +148,7 @@ func (r Request) Validate() error {
 				return errors.New("invalid response compaction prompt cache retention")
 			}
 		} else {
-			if err := validateTools(r.Responses.Tools, r.Responses.ToolChoice, r.Responses.TextFormat); err != nil {
+			if err := validateResponseTools(r.Responses.Tools, r.Responses.ToolChoice, r.Responses.TextFormat); err != nil {
 				return err
 			}
 			if r.MaxOutputTokens < 1 {
@@ -435,6 +435,30 @@ func validateTools(tools []Tool, choice *ToolChoice, format *ResponseFormat) err
 		}
 	}
 	return nil
+}
+
+func validateResponseTools(tools []Tool, choice *ToolChoice, format *ResponseFormat) error {
+	for _, tool := range tools {
+		switch tool.Type {
+		case "function":
+			if tool.Function.Name == "" || !ValidJSONObject(tool.Function.Parameters) {
+				return errors.New("invalid response function tool")
+			}
+		case "namespace":
+			if tool.Name == "" || len(tool.Tools) == 0 {
+				return errors.New("invalid response tool namespace")
+			}
+			for _, nested := range tool.Tools {
+				if nested.Type != "function" || nested.Function.Name == "" || !ValidJSONObject(nested.Function.Parameters) {
+					return errors.New("invalid namespaced response function tool")
+				}
+			}
+		case "web_search":
+		default:
+			return errors.New("invalid response tool")
+		}
+	}
+	return validateTools(nil, choice, format)
 }
 
 func validateResponseInput(item ResponseInputItem) error {

@@ -82,11 +82,13 @@ type responseInputItem struct {
 }
 
 type responseTool struct {
-	Type        string          `json:"type"`
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters"`
-	Strict      *bool           `json:"strict,omitempty"`
+	Type              string          `json:"type"`
+	Name              string          `json:"name,omitempty"`
+	Description       string          `json:"description,omitempty"`
+	Parameters        json.RawMessage `json:"parameters,omitempty"`
+	Strict            *bool           `json:"strict,omitempty"`
+	Tools             []responseTool  `json:"tools,omitempty"`
+	ExternalWebAccess *bool           `json:"external_web_access,omitempty"`
 }
 
 type responseContentPart struct {
@@ -226,10 +228,11 @@ func (h *Handler) canonicalResponse(id contract.ID, wire responsesRequest, reque
 	}
 	canonical := &contract.ResponsesRequest{Instructions: wire.Instructions, Input: input, Include: append([]string(nil), wire.Include...)}
 	for _, tool := range wire.Tools {
-		if tool.Type != "function" || tool.Name == "" || len(tool.Parameters) == 0 {
-			return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid function tool", http.StatusBadRequest, false, nil)
+		converted, err := convertResponseTool(tool)
+		if err != nil {
+			return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid response tool", http.StatusBadRequest, false, err)
 		}
-		canonical.Tools = append(canonical.Tools, contract.Tool{Type: tool.Type, Function: contract.FunctionDefinition{Name: tool.Name, Description: tool.Description, Parameters: append([]byte(nil), tool.Parameters...), Strict: tool.Strict}})
+		canonical.Tools = append(canonical.Tools, converted)
 	}
 	canonical.ToolChoice, err = convertResponseToolChoice(wire.ToolChoice)
 	if err != nil {
@@ -284,6 +287,38 @@ func (h *Handler) canonicalResponse(id contract.ID, wire responsesRequest, reque
 		EstimatedUsage: contract.Usage{InputTokens: requestBytes, OutputTokens: maximum, TotalTokens: requestBytes + maximum, Estimated: true},
 		Responses:      canonical,
 	}, nil
+}
+
+func convertResponseTool(tool responseTool) (contract.Tool, error) {
+	switch tool.Type {
+	case "function":
+		if tool.Name == "" || len(tool.Parameters) == 0 {
+			return contract.Tool{}, errors.New("function tool requires name and parameters")
+		}
+		return contract.Tool{Type: tool.Type, Function: contract.FunctionDefinition{
+			Name: tool.Name, Description: tool.Description, Parameters: append([]byte(nil), tool.Parameters...), Strict: tool.Strict,
+		}}, nil
+	case "namespace":
+		if tool.Name == "" || len(tool.Tools) == 0 {
+			return contract.Tool{}, errors.New("tool namespace requires name and tools")
+		}
+		converted := contract.Tool{Type: tool.Type, Name: tool.Name, Description: tool.Description}
+		for _, nested := range tool.Tools {
+			if nested.Type != "function" {
+				return contract.Tool{}, errors.New("tool namespace may contain only function tools")
+			}
+			child, err := convertResponseTool(nested)
+			if err != nil {
+				return contract.Tool{}, err
+			}
+			converted.Tools = append(converted.Tools, child)
+		}
+		return converted, nil
+	case "web_search":
+		return contract.Tool{Type: tool.Type, ExternalWebAccess: tool.ExternalWebAccess}, nil
+	default:
+		return contract.Tool{}, fmt.Errorf("unsupported response tool type %q", tool.Type)
+	}
 }
 
 func convertResponseToolChoice(raw json.RawMessage) (*contract.ToolChoice, error) {
