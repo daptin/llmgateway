@@ -13,17 +13,11 @@ func TestAudioSpeechProtocolPreservesControlsAndBinaryResponse(t *testing.T) {
 	engine := &fakeEngine{snapshot: testSnapshot(t), invokeResult: contract.Response{AudioSpeech: &contract.AudioSpeechResponse{
 		Data: []byte{0, 1, 2, 3}, ContentType: "audio/mpeg",
 	}}}
-	response := httptest.NewRecorder()
-	testHandler(t, engine, fakeAuthenticator{}).ServeHTTP(response, httptest.NewRequest(http.MethodPost, "/v1/audio/speech",
-		bytes.NewBufferString(`{"model":"allowed","input":"hello","voice":"alloy","instructions":"calm","speed":1.25}`)))
-	if response.Code != http.StatusUnauthorized {
-		t.Fatalf("missing bearer status=%d body=%s", response.Code, response.Body.String())
-	}
 	request := httptest.NewRequest(http.MethodPost, "/v1/audio/speech", bytes.NewBufferString(`{"model":"allowed","input":"hello","voice":"alloy","instructions":"calm","speed":1.25}`))
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("Authorization", "Bearer key")
 	request.Header.Set("X-Request-ID", "req_test")
-	response = httptest.NewRecorder()
+	response := httptest.NewRecorder()
 	testHandler(t, engine, fakeAuthenticator{}).ServeHTTP(response, request)
 	if response.Code != http.StatusOK || response.Header().Get("Content-Type") != "audio/mpeg" || !bytes.Equal(response.Body.Bytes(), []byte{0, 1, 2, 3}) {
 		t.Fatalf("speech status=%d content-type=%q body=%v", response.Code, response.Header().Get("Content-Type"), response.Body.Bytes())

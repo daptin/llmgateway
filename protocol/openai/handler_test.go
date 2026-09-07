@@ -18,9 +18,13 @@ import (
 type fakeAuthenticator struct {
 	principal contract.Principal
 	err       error
+	token     *string
 }
 
-func (f fakeAuthenticator) Authenticate(context.Context, string) (contract.Principal, error) {
+func (f fakeAuthenticator) Authenticate(_ context.Context, token string) (contract.Principal, error) {
+	if f.token != nil {
+		*f.token = token
+	}
 	return f.principal, f.err
 }
 
@@ -154,7 +158,6 @@ func TestAuthenticationAndRoutingErrorsUseOpenAIShape(t *testing.T) {
 		path   string
 		status int
 	}{
-		{name: "missing bearer", method: http.MethodGet, path: "/v1/models", status: http.StatusUnauthorized},
 		{name: "unknown route", method: http.MethodGet, path: "/v1/unknown", status: http.StatusNotFound},
 		{name: "wrong method", method: http.MethodPost, path: "/v1/models", status: http.StatusNotFound},
 	} {
@@ -168,6 +171,25 @@ func TestAuthenticationAndRoutingErrorsUseOpenAIShape(t *testing.T) {
 				t.Fatalf("not an OpenAI error response: %#v", value)
 			}
 		})
+	}
+}
+
+func TestMissingCredentialIsDelegatedToHostAuthenticator(t *testing.T) {
+	engine := &fakeEngine{snapshot: testSnapshot(t)}
+	var token string
+	handler := testHandler(t, engine, fakeAuthenticator{token: &token})
+	response := perform(handler, http.MethodGet, "/v1/models", "", "")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	if token != "" {
+		t.Fatalf("credential=%q, want empty", token)
+	}
+
+	rejected := testHandler(t, engine, fakeAuthenticator{err: errors.New("credential required")})
+	response = perform(rejected, http.MethodGet, "/v1/models", "", "")
+	if response.Code != http.StatusUnauthorized {
+		t.Fatalf("host rejection status=%d body=%s", response.Code, response.Body.String())
 	}
 }
 

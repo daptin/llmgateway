@@ -285,9 +285,6 @@ func (h *Handler) authenticate(request *http.Request) (contract.Principal, error
 	if bearerValid {
 		token = strings.TrimSpace(parts[1])
 	}
-	if token == "" {
-		return contract.Principal{}, gatewayError(contract.ErrorAuthentication, "missing or invalid API credential", http.StatusUnauthorized, false, nil)
-	}
 	principal, err := h.auth.Authenticate(request.Context(), token)
 	if err != nil {
 		var public *contract.Error

@@ -1,6 +1,6 @@
 # llmgateway
 
-`llmgateway` is an embeddable Go engine for authenticated, host-metered,
+`llmgateway` is an embeddable Go engine for host-authorized, host-metered,
 multi-provider LLM inference. It owns protocol normalization, routing, retries,
 stream commit semantics, guardrails, caching decisions, and provider-neutral
 usage facts. Hosts provide metering policy and persistence, identity, secrets,

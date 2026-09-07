@@ -17,6 +17,8 @@ type SecretResolver interface {
 }
 
 type Authenticator interface {
+	// credential is empty when the request supplies no API credential; the host
+	// decides whether that request has a principal.
 	Authenticate(context.Context, string) (contract.Principal, error)
 }
 
