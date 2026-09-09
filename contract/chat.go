@@ -55,6 +55,7 @@ type InputAudio struct {
 
 type InputFile struct {
 	Data     string
+	URL      string
 	Filename string
 }
 

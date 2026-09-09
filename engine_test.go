@@ -533,6 +533,50 @@ func TestInvokeRejectsModelCapabilityBeforeAdmission(t *testing.T) {
 	}
 }
 
+func TestResponsesFilesUseExistingCapabilityRoutingAndMeteringPath(t *testing.T) {
+	request := contract.Request{
+		ID: "responses-file", Operation: contract.OperationResponses, PublicModel: "model", MaxOutputTokens: 1,
+		EstimatedUsage: contract.Usage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2, Estimated: true},
+		Responses: &contract.ResponsesRequest{Input: []contract.ResponseInputItem{{
+			Type: "message", Role: "user", Content: []contract.ContentPart{{
+				Type: "input_file", File: &contract.InputFile{Data: "data:application/pdf;base64,cGRm", Filename: "brief.pdf"},
+			}},
+		}}},
+	}
+	document := testDocument()
+	document.Models[0].Operations = []contract.Operation{contract.OperationResponses}
+	document.Deployments[0].Operations = []contract.Operation{contract.OperationResponses}
+	provider := testkit.NewFaultAdapter(adapter.Capabilities{
+		Operations: map[contract.Operation]bool{contract.OperationResponses: true}, Features: map[string]bool{"files": true},
+	})
+	metering := testkit.NewMeteringRecorder()
+	engine := newEngineForDocument(t, document, provider, metering)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	_, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, request)
+	var public *contract.Error
+	if !errors.As(err, &public) || public.Code != contract.ErrorInvalidRequest || len(provider.Requests()) != 0 || metering.State(request.ID) != "" {
+		t.Fatalf("disabled files error=%v requests=%d metering=%q", err, len(provider.Requests()), metering.State(request.ID))
+	}
+
+	document.Models[0].Capabilities = map[string]bool{"files": true}
+	provider = testkit.NewFaultAdapter(adapter.Capabilities{
+		Operations: map[contract.Operation]bool{contract.OperationResponses: true}, Features: map[string]bool{"files": true},
+	}, testkit.AdapterStep{Response: contract.Response{Responses: &contract.ResponsesResponse{ID: "resp", Status: "completed", Output: []contract.ResponseOutputItem{}}, Usage: contract.Usage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}})
+	metering = testkit.NewMeteringRecorder()
+	engine = newEngineForDocument(t, document, provider, metering)
+	if err := engine.Reload(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Invoke(context.Background(), contract.Principal{KeyID: "key"}, request); err != nil {
+		t.Fatal(err)
+	}
+	if len(provider.Requests()) != 1 || metering.State(request.ID) != "finalized" {
+		t.Fatalf("enabled files requests=%d metering=%q", len(provider.Requests()), metering.State(request.ID))
+	}
+}
+
 func TestModelParameterPoliciesAreExplicitAndDoNotMutateCaller(t *testing.T) {
 	tool := contract.Tool{Type: "function", Function: contract.FunctionDefinition{Name: "lookup", Parameters: []byte(`{"type":"object"}`)}}
 	for _, test := range []struct {

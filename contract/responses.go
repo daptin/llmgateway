@@ -57,6 +57,7 @@ type ResponseOutputItem struct {
 	Status           string
 	EncryptedContent string
 	CreatedBy        string
+	Action           json.RawMessage
 }
 
 type ResponseDelta struct {

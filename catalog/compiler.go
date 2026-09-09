@@ -273,7 +273,7 @@ func validateModel(model Model) error {
 
 func validateModelCapabilities(model Model) error {
 	allowed := map[string]struct{}{
-		"audio": {}, "dimensions": {}, "exact_cache": {}, "json_schema": {}, "logprobs": {},
+		"audio": {}, "dimensions": {}, "exact_cache": {}, "files": {}, "json_schema": {}, "logprobs": {},
 		"parallel_tools": {}, "penalties": {}, "public_cache": {}, "reasoning": {}, "token_ids": {}, "tools": {}, "vision": {},
 	}
 	for capability := range model.Capabilities {

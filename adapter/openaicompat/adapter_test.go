@@ -399,6 +399,10 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 			if file["type"] != "input_file" || file["filename"] != "brief.pdf" || file["file_data"] != "data:application/pdf;base64,cGRm" {
 				t.Fatalf("Responses inline file was not preserved: %#v", content)
 			}
+			remoteFile := content[2].(map[string]any)
+			if remoteFile["type"] != "input_file" || remoteFile["filename"] != "remote.pdf" || remoteFile["file_url"] != "https://example.test/remote.pdf" {
+				t.Fatalf("Responses file URL was not preserved: %#v", content)
+			}
 			_, _ = io.WriteString(response, `{"id":"resp_1","model":"m","status":"completed","output":[{"type":"reasoning","id":"reason_1","summary":[{"type":"summary_text","text":"brief"}],"content":[{"type":"reasoning_text","text":"worked"}]},{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"hello"}]}],"usage":{"input_tokens":2,"output_tokens":1,"total_tokens":3}}`)
 		case "/v1/embeddings":
 			_, _ = io.WriteString(response, `{"model":"m","data":[{"index":0,"embedding":[0.1,0.2]}],"usage":{"prompt_tokens":2,"total_tokens":2}}`)
@@ -421,6 +425,7 @@ func TestInvokeSupportsResponsesEmbeddingsAndImages(t *testing.T) {
 			Input: []contract.ResponseInputItem{{ID: "msg_input_1", Type: "message", Role: "user", Content: []contract.ContentPart{
 				{Type: "input_text", Text: "hi"},
 				{Type: "input_file", File: &contract.InputFile{Data: "data:application/pdf;base64,cGRm", Filename: "brief.pdf"}},
+				{Type: "input_file", File: &contract.InputFile{URL: "https://example.test/remote.pdf", Filename: "remote.pdf"}},
 			}}},
 			Tools: []contract.Tool{
 				{Type: "function", Function: contract.FunctionDefinition{Name: "weather", Parameters: json.RawMessage(`{"type":"object"}`)}},
@@ -807,6 +812,21 @@ func TestResponsesStreamEventsPreserveTypedFields(t *testing.T) {
 	}`))
 	if err != nil || item.Response == nil || item.Response.Item == nil || item.Response.Item.CallID != "call_public" || item.Response.Item.Name != "weather" {
 		t.Fatalf("output item=%#v err=%v", item, err)
+	}
+
+	webItem, err := decodeResponsesEvent("", []byte(`{
+		"type":"response.output_item.done","sequence_number":5,"output_index":0,
+		"item":{"id":"ws_1","type":"web_search_call","status":"completed","action":{"type":"search","query":"weather","sources":[{"url":"https://example.test"}]}}
+	}`))
+	if err != nil || webItem.Response == nil || webItem.Response.Item == nil || webItem.Response.Item.Type != "web_search_call" || len(webItem.Response.Item.Action) == 0 {
+		t.Fatalf("web search item=%#v err=%v", webItem, err)
+	}
+
+	webLifecycle, err := decodeResponsesEvent("", []byte(`{
+		"type":"response.web_search_call.completed","sequence_number":6,"item_id":"ws_1","output_index":0
+	}`))
+	if err != nil || webLifecycle.Response == nil || webLifecycle.Response.ItemID != "ws_1" {
+		t.Fatalf("web search lifecycle=%#v err=%v", webLifecycle, err)
 	}
 
 	part, err := decodeResponsesEvent("", []byte(`{

@@ -863,7 +863,11 @@ func encodeResponseInput(items []contract.ResponseInputItem) []map[string]any {
 						encoded["detail"] = part.ImageURL.Detail
 					}
 				} else if part.Type == "input_file" {
-					encoded["file_data"] = part.File.Data
+					if part.File.Data != "" {
+						encoded["file_data"] = part.File.Data
+					} else {
+						encoded["file_url"] = part.File.URL
+					}
 					if part.File.Filename != "" {
 						encoded["filename"] = part.File.Filename
 					}

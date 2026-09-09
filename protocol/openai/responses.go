@@ -2,10 +2,13 @@ package openai
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"strings"
 
@@ -16,7 +19,6 @@ type responsesRequest struct {
 	Model              string             `json:"model"`
 	Input              json.RawMessage    `json:"input"`
 	Include            []string           `json:"include,omitempty"`
-	ClientMetadata     json.RawMessage    `json:"client_metadata,omitempty"`
 	Instructions       string             `json:"instructions,omitempty"`
 	Stream             bool               `json:"stream,omitempty"`
 	Tools              []responseTool     `json:"tools,omitempty"`
@@ -98,6 +100,7 @@ type responseContentPart struct {
 	Detail   string `json:"detail,omitempty"`
 	FileID   string `json:"file_id,omitempty"`
 	FileData string `json:"file_data,omitempty"`
+	FileURL  string `json:"file_url,omitempty"`
 	Filename string `json:"filename,omitempty"`
 }
 
@@ -122,7 +125,7 @@ func (h *Handler) responses(response http.ResponseWriter, request *http.Request)
 		writeError(response, gatewayError(contract.ErrorInvalidRequest, strictJSONErrorMessage("invalid responses request", err), http.StatusBadRequest, false, err), id)
 		return
 	}
-	canonical, err := h.canonicalResponse(id, wire, int64(len(body)))
+	canonical, err := h.canonicalResponse(request.Context(), principal, id, wire, int64(len(body)))
 	if err != nil {
 		writeError(response, err, id)
 		return
@@ -165,7 +168,7 @@ func (h *Handler) compactResponses(response http.ResponseWriter, request *http.R
 		writeError(response, gatewayError(contract.ErrorInvalidRequest, "invalid response compaction request", http.StatusBadRequest, false, err), id)
 		return
 	}
-	canonical, err := canonicalResponseCompaction(id, wire, int64(len(body)))
+	canonical, err := h.canonicalResponseCompaction(request.Context(), principal, id, wire, int64(len(body)))
 	if err != nil {
 		writeError(response, err, id)
 		return
@@ -183,17 +186,25 @@ func (h *Handler) compactResponses(response http.ResponseWriter, request *http.R
 	writeJSON(response, http.StatusOK, id, encoded)
 }
 
-func canonicalResponseCompaction(id contract.ID, wire compactResponsesRequest, requestBytes int64) (contract.Request, error) {
+func (h *Handler) canonicalResponseCompaction(ctx context.Context, principal contract.Principal, id contract.ID, wire compactResponsesRequest, requestBytes int64) (contract.Request, error) {
 	if strings.TrimSpace(wire.Model) == "" || len(bytes.TrimSpace(wire.Input)) == 0 {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "model and input are required", http.StatusBadRequest, false, nil)
 	}
 	if wire.PreviousResponseID != nil {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "stateful response compaction is not supported", http.StatusBadRequest, false, nil)
 	}
-	input, err := convertResponseInput(wire.Input)
+	input, resolvedBytes, err := h.convertResponseInput(ctx, principal, wire.Input)
 	if err != nil {
+		var contractError *contract.Error
+		if errors.As(err, &contractError) {
+			return contract.Request{}, contractError
+		}
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "invalid response compaction input", http.StatusBadRequest, false, err)
 	}
+	if resolvedBytes > h.maxBody-requestBytes {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "stored response input files are too large", http.StatusBadRequest, false, nil)
+	}
+	requestBytes += resolvedBytes
 	canonical := &contract.ResponsesRequest{Instructions: wire.Instructions, Input: input, PromptCacheKey: wire.PromptCacheKey,
 		PromptCacheRetention: wire.PromptCacheRetention, ServiceTier: wire.ServiceTier}
 	if wire.PromptCacheOptions != nil {
@@ -208,7 +219,7 @@ func canonicalResponseCompaction(id contract.ID, wire compactResponsesRequest, r
 	return request, nil
 }
 
-func (h *Handler) canonicalResponse(id contract.ID, wire responsesRequest, requestBytes int64) (contract.Request, error) {
+func (h *Handler) canonicalResponse(ctx context.Context, principal contract.Principal, id contract.ID, wire responsesRequest, requestBytes int64) (contract.Request, error) {
 	if strings.TrimSpace(wire.Model) == "" || len(bytes.TrimSpace(wire.Input)) == 0 {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "model and input are required", http.StatusBadRequest, false, nil)
 	}
@@ -222,10 +233,18 @@ func (h *Handler) canonicalResponse(id contract.ID, wire responsesRequest, reque
 	if wire.MaxOutputTokens != nil && maximum < 1 {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "max_output_tokens must be positive", http.StatusBadRequest, false, nil)
 	}
-	input, err := convertResponseInput(wire.Input)
+	input, resolvedBytes, err := h.convertResponseInput(ctx, principal, wire.Input)
 	if err != nil {
+		var contractError *contract.Error
+		if errors.As(err, &contractError) {
+			return contract.Request{}, contractError
+		}
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, strictJSONErrorMessage("invalid response input", err), http.StatusBadRequest, false, err)
 	}
+	if resolvedBytes > h.maxBody-requestBytes {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "stored response input files are too large", http.StatusBadRequest, false, nil)
+	}
+	requestBytes += resolvedBytes
 	canonical := &contract.ResponsesRequest{Instructions: wire.Instructions, Input: input, Include: append([]string(nil), wire.Include...)}
 	for _, tool := range wire.Tools {
 		converted, err := convertResponseTool(tool)
@@ -342,112 +361,163 @@ func convertResponseToolChoice(raw json.RawMessage) (*contract.ToolChoice, error
 	return &contract.ToolChoice{Mode: "function", FunctionName: value.Name}, nil
 }
 
-func convertResponseInput(raw json.RawMessage) ([]contract.ResponseInputItem, error) {
+func (h *Handler) convertResponseInput(ctx context.Context, principal contract.Principal, raw json.RawMessage) ([]contract.ResponseInputItem, int64, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
-		return nil, errors.New("input is required")
+		return nil, 0, errors.New("input is required")
 	}
 	if trimmed[0] == '"' {
 		var text string
 		if err := json.Unmarshal(trimmed, &text); err != nil || text == "" {
-			return nil, errors.New("input text cannot be empty")
+			return nil, 0, errors.New("input text cannot be empty")
 		}
-		return []contract.ResponseInputItem{{Type: "message", Role: "user", Content: []contract.ContentPart{{Type: "input_text", Text: text}}}}, nil
+		return []contract.ResponseInputItem{{Type: "message", Role: "user", Content: []contract.ContentPart{{Type: "input_text", Text: text}}}}, 0, nil
 	}
 	var items []responseInputItem
 	if err := decodeStrict(trimmed, &items); err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	if len(items) == 0 {
-		return nil, errors.New("input must be a string or non-empty item array")
+		return nil, 0, errors.New("input must be a string or non-empty item array")
 	}
 	result := make([]contract.ResponseInputItem, 0, len(items))
+	var resolvedBytes int64
 	for _, item := range items {
-		converted, err := convertResponseInputItem(item)
+		converted, bytesAdded, err := h.convertResponseInputItem(ctx, principal, item)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		result = append(result, converted)
+		if bytesAdded > h.maxBody-resolvedBytes {
+			return nil, 0, gatewayError(contract.ErrorInvalidRequest, "stored response input files are too large", http.StatusBadRequest, false, nil)
+		}
+		resolvedBytes += bytesAdded
 	}
-	return result, nil
+	return result, resolvedBytes, nil
 }
 
-func convertResponseInputItem(item responseInputItem) (contract.ResponseInputItem, error) {
+func (h *Handler) convertResponseInputItem(ctx context.Context, principal contract.Principal, item responseInputItem) (contract.ResponseInputItem, int64, error) {
 	switch item.Type {
 	case "", "message":
 		if item.Role == "" {
 			item.Role = "user"
 		}
 		if item.Role != "user" && item.Role != "assistant" && item.Role != "system" && item.Role != "developer" {
-			return contract.ResponseInputItem{}, fmt.Errorf("invalid message role %q", item.Role)
+			return contract.ResponseInputItem{}, 0, fmt.Errorf("invalid message role %q", item.Role)
 		}
-		content, err := convertResponseContent(item.Content)
+		content, resolvedBytes, err := h.convertResponseContent(ctx, principal, item.Content)
 		if err != nil {
-			return contract.ResponseInputItem{}, err
+			return contract.ResponseInputItem{}, 0, err
 		}
-		return contract.ResponseInputItem{ID: item.ID, Type: "message", Role: item.Role, Content: content}, nil
+		return contract.ResponseInputItem{ID: item.ID, Type: "message", Role: item.Role, Content: content}, resolvedBytes, nil
 	case "function_call":
 		if item.CallID == "" || item.Name == "" || item.Arguments == "" {
-			return contract.ResponseInputItem{}, errors.New("function_call requires call_id, name, and arguments")
+			return contract.ResponseInputItem{}, 0, errors.New("function_call requires call_id, name, and arguments")
 		}
-		return contract.ResponseInputItem{ID: item.ID, Type: item.Type, CallID: item.CallID, Name: item.Name, Arguments: item.Arguments}, nil
+		return contract.ResponseInputItem{ID: item.ID, Type: item.Type, CallID: item.CallID, Name: item.Name, Arguments: item.Arguments}, 0, nil
 	case "function_call_output":
 		if item.CallID == "" || item.Output == "" {
-			return contract.ResponseInputItem{}, errors.New("function_call_output requires call_id and output")
+			return contract.ResponseInputItem{}, 0, errors.New("function_call_output requires call_id and output")
 		}
-		return contract.ResponseInputItem{ID: item.ID, Type: item.Type, CallID: item.CallID, Output: item.Output}, nil
+		return contract.ResponseInputItem{ID: item.ID, Type: item.Type, CallID: item.CallID, Output: item.Output}, 0, nil
 	case "compaction":
 		if item.EncryptedContent == "" {
-			return contract.ResponseInputItem{}, errors.New("compaction requires encrypted_content")
+			return contract.ResponseInputItem{}, 0, errors.New("compaction requires encrypted_content")
 		}
-		return contract.ResponseInputItem{ID: item.ID, Type: item.Type, EncryptedContent: item.EncryptedContent}, nil
+		return contract.ResponseInputItem{ID: item.ID, Type: item.Type, EncryptedContent: item.EncryptedContent}, 0, nil
 	default:
-		return contract.ResponseInputItem{}, fmt.Errorf("unsupported input item type %q", item.Type)
+		return contract.ResponseInputItem{}, 0, fmt.Errorf("unsupported input item type %q", item.Type)
 	}
 }
 
-func convertResponseContent(raw json.RawMessage) ([]contract.ContentPart, error) {
+func (h *Handler) convertResponseContent(ctx context.Context, principal contract.Principal, raw json.RawMessage) ([]contract.ContentPart, int64, error) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 {
-		return nil, errors.New("message content is required")
+		return nil, 0, errors.New("message content is required")
 	}
 	if trimmed[0] == '"' {
 		var text string
 		if err := json.Unmarshal(trimmed, &text); err != nil || text == "" {
-			return nil, errors.New("message content cannot be empty")
+			return nil, 0, errors.New("message content cannot be empty")
 		}
-		return []contract.ContentPart{{Type: "input_text", Text: text}}, nil
+		return []contract.ContentPart{{Type: "input_text", Text: text}}, 0, nil
 	}
 	var parts []responseContentPart
 	if err := decodeStrict(trimmed, &parts); err != nil || len(parts) == 0 {
-		return nil, errors.New("message content must be text or a non-empty content array")
+		return nil, 0, errors.New("message content must be text or a non-empty content array")
 	}
 	result := make([]contract.ContentPart, 0, len(parts))
+	var resolvedBytes int64
 	for _, part := range parts {
 		switch part.Type {
 		case "input_text":
 			if part.Text == "" {
-				return nil, errors.New("input_text cannot be empty")
+				return nil, 0, errors.New("input_text cannot be empty")
 			}
 			result = append(result, contract.ContentPart{Type: part.Type, Text: part.Text})
 		case "input_image":
 			if part.ImageURL == "" {
-				return nil, errors.New("input_image requires image_url")
+				return nil, 0, errors.New("input_image requires image_url")
 			}
 			result = append(result, contract.ContentPart{Type: part.Type, ImageURL: &contract.ImageURL{URL: part.ImageURL, Detail: part.Detail}})
 		case "input_file":
+			sources := 0
 			if part.FileID != "" {
-				return nil, errors.New("provider-bound file_id input is not supported")
+				sources++
 			}
-			if part.FileData == "" {
-				return nil, errors.New("input_file requires file_data")
+			if part.FileData != "" {
+				sources++
 			}
-			result = append(result, contract.ContentPart{Type: part.Type, File: &contract.InputFile{Data: part.FileData, Filename: part.Filename}})
+			if part.FileURL != "" {
+				sources++
+			}
+			if sources != 1 {
+				return nil, 0, errors.New("input_file requires exactly one of file_data, file_id, or file_url")
+			}
+			if part.FileID != "" {
+				file, bytesAdded, err := h.resolveResponseFile(ctx, principal, contract.ID(part.FileID), part.Filename)
+				if err != nil {
+					return nil, 0, err
+				}
+				resolvedBytes += bytesAdded
+				result = append(result, contract.ContentPart{Type: part.Type, File: file})
+			} else {
+				result = append(result, contract.ContentPart{Type: part.Type, File: &contract.InputFile{Data: part.FileData, URL: part.FileURL, Filename: part.Filename}})
+			}
 		default:
-			return nil, fmt.Errorf("unsupported response content type %q", part.Type)
+			return nil, 0, fmt.Errorf("unsupported response content type %q", part.Type)
 		}
 	}
-	return result, nil
+	return result, resolvedBytes, nil
+}
+
+func (h *Handler) resolveResponseFile(ctx context.Context, principal contract.Principal, id contract.ID, filename string) (*contract.InputFile, int64, error) {
+	if h.files == nil {
+		return nil, 0, gatewayError(contract.ErrorInvalidRequest, "file_id input requires configured file storage", http.StatusBadRequest, false, nil)
+	}
+	content, err := h.files.Content(ctx, principal, id)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(content.Data) == 0 {
+		return nil, 0, gatewayError(contract.ErrorInvalidRequest, "stored response input file is empty or too large", http.StatusBadRequest, false, nil)
+	}
+	contentType := strings.TrimSpace(content.ContentType)
+	if contentType == "" {
+		contentType = http.DetectContentType(content.Data)
+	}
+	contentType, _, err = mime.ParseMediaType(contentType)
+	if err != nil {
+		return nil, 0, gatewayError(contract.ErrorInvalidRequest, "stored response input file has an invalid content type", http.StatusBadRequest, false, err)
+	}
+	encoded := "data:" + contentType + ";base64," + base64.StdEncoding.EncodeToString(content.Data)
+	if int64(len(encoded)) > h.maxBody {
+		return nil, 0, gatewayError(contract.ErrorInvalidRequest, "stored response input file is empty or too large", http.StatusBadRequest, false, nil)
+	}
+	if filename == "" {
+		filename = content.Filename
+	}
+	return &contract.InputFile{Data: encoded, Filename: filename}, int64(len(encoded)), nil
 }
 
 func convertResponseTextFormat(format responseTextFormat) (*contract.ResponseFormat, error) {
@@ -538,6 +608,14 @@ func encodeResponseOutput(item contract.ResponseOutputItem, compact bool) (map[s
 		encoded["call_id"] = item.CallID
 		encoded["name"] = item.Name
 		encoded["arguments"] = item.Arguments
+	case "web_search_call":
+		if item.ID == "" || item.Status == "" || (len(item.Action) != 0 && !contract.ValidJSONObject(item.Action)) {
+			return nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete web search call", http.StatusBadGateway, false, nil)
+		}
+		encoded["status"] = item.Status
+		if len(item.Action) != 0 {
+			encoded["action"] = json.RawMessage(append([]byte(nil), item.Action...))
+		}
 	case "reasoning":
 		if item.Status != "" {
 			encoded["status"] = item.Status
@@ -590,10 +668,14 @@ func encodeResponseContentPart(part contract.ContentPart) (map[string]any, error
 			value["detail"] = part.ImageURL.Detail
 		}
 	case "input_file":
-		if part.File == nil || part.File.Data == "" {
-			return nil, errors.New("response input file is not inline")
+		if part.File == nil || (part.File.Data == "") == (part.File.URL == "") {
+			return nil, errors.New("response input file has an invalid source")
 		}
-		value["file_data"] = part.File.Data
+		if part.File.Data != "" {
+			value["file_data"] = part.File.Data
+		} else {
+			value["file_url"] = part.File.URL
+		}
 		if part.File.Filename != "" {
 			value["filename"] = part.File.Filename
 		}
@@ -740,6 +822,11 @@ func encodeResponseEvent(request contract.Request, event contract.StreamEvent) (
 			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete function arguments done event", http.StatusBadGateway, false, nil)
 		}
 		payload["item_id"], payload["output_index"], payload["arguments"], payload["name"] = delta.ItemID, delta.OutputIndex, delta.Arguments, delta.Name
+	case "response.web_search_call.in_progress", "response.web_search_call.searching", "response.web_search_call.completed":
+		if delta.ItemID == "" || delta.OutputIndex < 0 {
+			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete web search event", http.StatusBadGateway, false, nil)
+		}
+		payload["item_id"], payload["output_index"] = delta.ItemID, delta.OutputIndex
 	case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
 		if delta.Part == nil || delta.ItemID == "" || delta.OutputIndex < 0 || delta.SummaryIndex < 0 {
 			return "", nil, gatewayError(contract.ErrorProvider, "provider returned an incomplete reasoning summary part event", http.StatusBadGateway, false, nil)

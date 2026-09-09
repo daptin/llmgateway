@@ -184,8 +184,107 @@ func TestResponsesRejectStateAndPreserveTypedInput(t *testing.T) {
 	assertJSONEqual(t, response.Body.String(), `{"id":"resp_1","model":"allowed","object":"response","output":[{"content":[{"annotations":[],"text":"sunny","type":"output_text"}],"id":"msg_1","role":"assistant","status":"completed","type":"message"}],"status":"completed","usage":{"input_tokens":5,"input_tokens_details":{"cached_tokens":2},"output_tokens":1,"output_tokens_details":{"reasoning_tokens":1},"total_tokens":6}}`)
 }
 
-func TestResponsesAcceptCodex01532Request(t *testing.T) {
+func TestResponsesResolveStoredFilesAndPreserveFileURLs(t *testing.T) {
+	engine := &fakeEngine{snapshot: testSnapshot(t), invokeResult: contract.Response{
+		Model: "allowed", Responses: &contract.ResponsesResponse{ID: "resp_files", Status: "completed", Output: []contract.ResponseOutputItem{}},
+	}}
+	store := &fakeFileStore{content: contract.FileContent{Filename: "stored.pdf", ContentType: "application/pdf", Data: []byte("pdf")}}
+	handler, err := NewHandler(engine, fakeAuthenticator{principal: contract.Principal{OwnerID: "owner-1"}}, Options{
+		Files: store, MaxBodyBytes: 1024, NewRequestID: func() (contract.ID, error) { return "req_files", nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := `{"model":"allowed","input":[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file-1"},{"type":"input_file","file_url":"https://example.test/brief.pdf","filename":"remote.pdf"}]}]}`
+	response := perform(handler, http.MethodPost, "/v1/responses", body, "key")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	parts := engine.invokeRequest.Responses.Input[0].Content
+	if len(parts) != 2 || parts[0].File == nil || parts[0].File.Data != "data:application/pdf;base64,cGRm" || parts[0].File.Filename != "stored.pdf" ||
+		parts[1].File == nil || parts[1].File.URL != "https://example.test/brief.pdf" || parts[1].File.Data != "" {
+		t.Fatalf("normalized files = %#v", parts)
+	}
+	if engine.invokeRequest.EstimatedUsage.InputTokens <= int64(len(body)) {
+		t.Fatalf("resolved file was omitted from usage estimate: %#v", engine.invokeRequest.EstimatedUsage)
+	}
+}
+
+func TestResponsesRejectInvalidOrUnavailableFileSources(t *testing.T) {
+	engine := &fakeEngine{snapshot: testSnapshot(t)}
+	withoutFiles := testHandler(t, engine, fakeAuthenticator{})
+	missing := perform(withoutFiles, http.MethodPost, "/v1/responses", `{"model":"allowed","input":[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file-1"}]}]}`, "key")
+	if missing.Code != http.StatusBadRequest || engine.invokeRequest.Responses != nil {
+		t.Fatalf("unconfigured file store reached engine: status=%d request=%#v", missing.Code, engine.invokeRequest)
+	}
+
+	handler, err := NewHandler(engine, fakeAuthenticator{}, Options{Files: &fakeFileStore{}, NewRequestID: func() (contract.ID, error) { return "req_files", nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, content := range []string{
+		`{"type":"input_file"}`,
+		`{"type":"input_file","file_data":"data:application/pdf;base64,cGRm","file_id":"file-1"}`,
+		`{"type":"input_file","file_data":"data:application/pdf;base64,cGRm","file_url":"https://example.test/brief.pdf"}`,
+	} {
+		response := perform(handler, http.MethodPost, "/v1/responses", `{"model":"allowed","input":[{"type":"message","role":"user","content":[`+content+`]}]}`, "key")
+		if response.Code != http.StatusBadRequest {
+			t.Fatalf("invalid file source accepted: status=%d content=%s", response.Code, content)
+		}
+	}
+	deniedEngine := &fakeEngine{snapshot: testSnapshot(t)}
+	deniedStore := &fakeFileStore{err: &contract.Error{Code: contract.ErrorPermission, Message: "file not found", HTTPStatus: http.StatusNotFound}}
+	deniedHandler, err := NewHandler(deniedEngine, fakeAuthenticator{}, Options{
+		Files: deniedStore, NewRequestID: func() (contract.ID, error) { return "req_denied_file", nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied := perform(deniedHandler, http.MethodPost, "/v1/responses",
+		`{"model":"allowed","input":[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file-secret"}]}]}`, "key")
+	if denied.Code != http.StatusNotFound || deniedEngine.invokeRequest.Operation != "" {
+		t.Fatalf("inaccessible file status=%d request=%#v", denied.Code, deniedEngine.invokeRequest)
+	}
+	for _, test := range []struct {
+		name    string
+		content contract.FileContent
+	}{
+		{name: "invalid MIME", content: contract.FileContent{Filename: "bad", ContentType: ";", Data: []byte("data")}},
+		{name: "oversized", content: contract.FileContent{Filename: "large.pdf", ContentType: "application/pdf", Data: make([]byte, 256)}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			boundedEngine := &fakeEngine{snapshot: testSnapshot(t)}
+			boundedHandler, err := NewHandler(boundedEngine, fakeAuthenticator{}, Options{
+				Files: &fakeFileStore{content: test.content}, MaxBodyBytes: 200,
+				NewRequestID: func() (contract.ID, error) { return "req_bounded_file", nil },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := perform(boundedHandler, http.MethodPost, "/v1/responses",
+				`{"model":"allowed","input":[{"type":"message","role":"user","content":[{"type":"input_file","file_id":"file-1"}]}]}`, "key")
+			if response.Code != http.StatusBadRequest || boundedEngine.invokeRequest.Operation != "" {
+				t.Fatalf("invalid stored file reached engine: status=%d request=%#v", response.Code, boundedEngine.invokeRequest)
+			}
+		})
+	}
+}
+
+func TestResponsesRejectIgnoredClientMetadataAndAcceptRemainingCodexRequest(t *testing.T) {
 	body, err := os.ReadFile("testdata/codex-0.153.2-responses-request.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rejected := perform(testHandler(t, &fakeEngine{snapshot: testSnapshot(t)}, fakeAuthenticator{}), http.MethodPost, "/v1/responses", string(body), "key")
+	if rejected.Code != http.StatusBadRequest || !strings.Contains(rejected.Body.String(), `unsupported field \"client_metadata\"`) {
+		t.Fatalf("ignored client metadata was not rejected: status=%d body=%s", rejected.Code, rejected.Body.String())
+	}
+	var requestBody map[string]any
+	if err := json.Unmarshal(body, &requestBody); err != nil {
+		t.Fatal(err)
+	}
+	delete(requestBody, "client_metadata")
+	body, err = json.Marshal(requestBody)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,6 +403,20 @@ func TestResponsesStreamingUsesNamedSSEEvents(t *testing.T) {
 	}
 }
 
+func TestResponsesPreserveWebSearchOutput(t *testing.T) {
+	engine := &fakeEngine{snapshot: testSnapshot(t), invokeResult: contract.Response{
+		Model: "allowed", Responses: &contract.ResponsesResponse{ID: "resp_web", Status: "completed", Output: []contract.ResponseOutputItem{{
+			Type: "web_search_call", ID: "ws_1", Status: "completed", Action: json.RawMessage(`{"type":"search","query":"weather","sources":[{"url":"https://example.test"}]}`),
+		}}},
+	}}
+	response := perform(testHandler(t, engine, fakeAuthenticator{}), http.MethodPost, "/v1/responses",
+		`{"model":"allowed","input":"weather","tools":[{"type":"web_search"}]}`, "key")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+	assertJSONEqual(t, response.Body.String(), `{"id":"resp_web","model":"allowed","object":"response","output":[{"action":{"type":"search","query":"weather","sources":[{"url":"https://example.test"}]},"id":"ws_1","status":"completed","type":"web_search_call"}],"status":"completed","usage":{"input_tokens":0,"output_tokens":0,"total_tokens":0}}`)
+}
+
 func TestResponsesEventEncodingPreservesTypedFields(t *testing.T) {
 	request := contract.Request{PublicModel: "public-model"}
 	tests := []struct {
@@ -318,6 +431,9 @@ func TestResponsesEventEncodingPreservesTypedFields(t *testing.T) {
 		{name: "function arguments", event: contract.StreamEvent{Type: "response.function_call_arguments.done", Response: &contract.ResponseDelta{
 			Sequence: 5, ItemID: "call_1", OutputIndex: 0, Name: "weather", Arguments: `{"city":"Pune"}`,
 		}}, want: `{"type":"response.function_call_arguments.done","sequence_number":5,"item_id":"call_1","output_index":0,"name":"weather","arguments":"{\"city\":\"Pune\"}"}`},
+		{name: "web search", event: contract.StreamEvent{Type: "response.web_search_call.completed", Response: &contract.ResponseDelta{
+			Sequence: 6, ItemID: "ws_1", OutputIndex: 0,
+		}}, want: `{"type":"response.web_search_call.completed","sequence_number":6,"item_id":"ws_1","output_index":0}`},
 		{name: "reasoning summary", event: contract.StreamEvent{Type: "response.reasoning_summary_text.done", Response: &contract.ResponseDelta{
 			Sequence: 6, ItemID: "reason_1", OutputIndex: 0, SummaryIndex: 1, Text: "checked",
 		}}, want: `{"type":"response.reasoning_summary_text.done","sequence_number":6,"item_id":"reason_1","output_index":0,"summary_index":1,"text":"checked"}`},

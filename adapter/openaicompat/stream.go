@@ -359,6 +359,10 @@ func decodeResponsesEvent(name string, data []byte) (contract.StreamEvent, error
 		if !validResponseOutputCoordinates(wire) || wire.Name == "" {
 			return contract.StreamEvent{}, errors.New("responses function arguments done event is incomplete")
 		}
+	case "response.web_search_call.in_progress", "response.web_search_call.searching", "response.web_search_call.completed":
+		if !validResponseOutputCoordinates(wire) {
+			return contract.StreamEvent{}, errors.New("responses web search event is incomplete")
+		}
 	case "response.reasoning_summary_part.added", "response.reasoning_summary_part.done":
 		if !validResponseSummaryCoordinates(wire) || len(wire.Part) == 0 {
 			return contract.StreamEvent{}, errors.New("responses reasoning summary part event is incomplete")
@@ -402,6 +406,7 @@ func decodeResponseContentPart(raw json.RawMessage) (contract.ContentPart, error
 		Detail      string          `json:"detail"`
 		FileID      string          `json:"file_id"`
 		FileData    string          `json:"file_data"`
+		FileURL     string          `json:"file_url"`
 		Filename    string          `json:"filename"`
 		Annotations json.RawMessage `json:"annotations"`
 		Logprobs    json.RawMessage `json:"logprobs"`
@@ -416,8 +421,8 @@ func decodeResponseContentPart(raw json.RawMessage) (contract.ContentPart, error
 			return contract.ContentPart{}, errors.New("response input image has no URL")
 		}
 	case "input_file":
-		if wire.FileID != "" || wire.FileData == "" {
-			return contract.ContentPart{}, errors.New("response input file is not inline")
+		if wire.FileID != "" || (wire.FileData == "") == (wire.FileURL == "") {
+			return contract.ContentPart{}, errors.New("response input file has an invalid source")
 		}
 	case "refusal":
 	default:
@@ -441,7 +446,7 @@ func decodeResponseContentPart(raw json.RawMessage) (contract.ContentPart, error
 		part.ImageURL = &contract.ImageURL{URL: wire.ImageURL, Detail: wire.Detail}
 	}
 	if wire.Type == "input_file" {
-		part.File = &contract.InputFile{Data: wire.FileData, Filename: wire.Filename}
+		part.File = &contract.InputFile{Data: wire.FileData, URL: wire.FileURL, Filename: wire.Filename}
 	}
 	return part, nil
 }
@@ -457,6 +462,7 @@ func decodeResponseOutputItem(raw json.RawMessage, compact bool) (contract.Respo
 		Arguments        string            `json:"arguments"`
 		EncryptedContent string            `json:"encrypted_content"`
 		CreatedBy        string            `json:"created_by"`
+		Action           json.RawMessage   `json:"action"`
 		Content          []json.RawMessage `json:"content"`
 		Summary          []json.RawMessage `json:"summary"`
 	}
@@ -477,6 +483,16 @@ func decodeResponseOutputItem(raw json.RawMessage, compact bool) (contract.Respo
 		if wire.Status == "" || wire.CallID == "" || wire.Name == "" {
 			return contract.ResponseOutputItem{}, errors.New("response function call output is incomplete")
 		}
+	case "web_search_call":
+		if wire.Status == "" {
+			return contract.ResponseOutputItem{}, errors.New("response web search call is incomplete")
+		}
+		if len(wire.Action) != 0 {
+			var action map[string]any
+			if err := json.Unmarshal(wire.Action, &action); err != nil || action == nil {
+				return contract.ResponseOutputItem{}, errors.New("response web search action is invalid")
+			}
+		}
 	case "reasoning":
 		if wire.Summary == nil {
 			return contract.ResponseOutputItem{}, errors.New("response reasoning output is incomplete")
@@ -489,7 +505,7 @@ func decodeResponseOutputItem(raw json.RawMessage, compact bool) (contract.Respo
 		return contract.ResponseOutputItem{}, fmt.Errorf("unsupported response output item %q", wire.Type)
 	}
 	item := contract.ResponseOutputItem{Type: wire.Type, ID: wire.ID, Role: wire.Role, Status: wire.Status, CallID: wire.CallID, Name: wire.Name, Arguments: wire.Arguments,
-		EncryptedContent: wire.EncryptedContent, CreatedBy: wire.CreatedBy}
+		EncryptedContent: wire.EncryptedContent, CreatedBy: wire.CreatedBy, Action: append([]byte(nil), wire.Action...)}
 	for _, rawPart := range wire.Content {
 		part, err := decodeResponseContentPart(rawPart)
 		inputPart := part.Type == "input_text" || part.Type == "input_image" || part.Type == "input_file"

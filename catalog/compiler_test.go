@@ -96,6 +96,7 @@ func TestCompileRejectsAcceptedLookingButUnimplementedModelConfiguration(t *test
 		{name: "zero default", mutate: func(model *Model) { model.DefaultParameters = []byte(`{"chat":{"n":0}}`) }},
 		{name: "undeclared operation default", mutate: func(model *Model) { model.DefaultParameters = []byte(`{"embeddings":{"encoding_format":"float"}}`) }},
 		{name: "unknown capability", mutate: func(model *Model) { model.Capabilities = map[string]bool{"magic": true} }},
+		{name: "adapter-only streaming capability", mutate: func(model *Model) { model.Capabilities = map[string]bool{"streaming": true} }},
 		{name: "public cache without exact cache", mutate: func(model *Model) { model.Capabilities = map[string]bool{"public_cache": true} }},
 	}
 	for _, test := range tests {
@@ -116,6 +117,18 @@ func TestCompileAcceptsImplementedParameterPolicies(t *testing.T) {
 		if _, err := Compile(document); err != nil {
 			t.Fatalf("policy %q: %v", policy, err)
 		}
+	}
+}
+
+func TestCompileAcceptsEveryDocumentedModelCapability(t *testing.T) {
+	document := validDocument()
+	document.Models[0].Capabilities = map[string]bool{
+		"audio": true, "dimensions": true, "exact_cache": true, "files": true,
+		"json_schema": true, "logprobs": true, "parallel_tools": true, "penalties": true,
+		"public_cache": true, "reasoning": true, "token_ids": true, "tools": true, "vision": true,
+	}
+	if _, err := Compile(document); err != nil {
+		t.Fatalf("documented model capabilities were rejected: %v", err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 )
 
 func (r Request) Validate() error {
@@ -478,8 +479,14 @@ func validateResponseInput(item ResponseInputItem) error {
 					return errors.New("response input image requires a URL")
 				}
 			case "input_file":
-				if part.File == nil || part.File.Data == "" {
-					return errors.New("response input file requires inline data")
+				if part.File == nil || (part.File.Data == "") == (part.File.URL == "") {
+					return errors.New("response input file requires exactly one data or URL source")
+				}
+				if part.File.URL != "" {
+					parsed, err := url.Parse(part.File.URL)
+					if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
+						return errors.New("response input file has an invalid URL")
+					}
 				}
 			default:
 				return errors.New("unsupported response input content")
