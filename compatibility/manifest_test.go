@@ -14,11 +14,11 @@ func TestDefaultManifestIsValid(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(manifest.Endpoints) != 31 {
-		t.Fatalf("expected 31 endpoints, got %d", len(manifest.Endpoints))
+	if len(manifest.Endpoints) != 33 {
+		t.Fatalf("expected 33 endpoints, got %d", len(manifest.Endpoints))
 	}
-	if len(manifest.Unsupported) != 32 {
-		t.Fatalf("expected 32 explicitly unsupported endpoints, got %d", len(manifest.Unsupported))
+	if len(manifest.Unsupported) != 30 {
+		t.Fatalf("expected 30 explicitly unsupported endpoints, got %d", len(manifest.Unsupported))
 	}
 	if manifest.Kind != "target" || len(manifest.Providers) != 1 || manifest.Providers[0].Name != "openai-compatible" {
 		t.Fatalf("manifest overstates implemented provider coverage: %+v", manifest.Providers)

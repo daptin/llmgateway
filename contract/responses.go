@@ -3,6 +3,8 @@ package contract
 import "encoding/json"
 
 type ResponsesRequest struct {
+	Store                bool
+	PreviousResponseID   string
 	Instructions         string
 	Input                []ResponseInputItem
 	Include              []string
@@ -35,14 +37,19 @@ type ResponseInputItem struct {
 	Arguments        string
 	Output           string
 	EncryptedContent string
+	Summary          []ContentPart
+	Status           string
+	Action           json.RawMessage
 }
 
 type ResponsesResponse struct {
-	ID        string
-	Object    string
-	CreatedAt int64
-	Status    string
-	Output    []ResponseOutputItem
+	Store              bool
+	PreviousResponseID string
+	ID                 string
+	Object             string
+	CreatedAt          int64
+	Status             string
+	Output             []ResponseOutputItem
 }
 
 type ResponseOutputItem struct {

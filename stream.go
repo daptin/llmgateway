@@ -2,6 +2,7 @@ package llmgateway
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"sync"
@@ -13,6 +14,11 @@ import (
 )
 
 type GatewayStream struct {
+	captured      []contract.StreamEvent
+	capturedBytes int
+	streamBytes   int
+	captureFull   bool
+	finalResponse *contract.Response
 	mu            sync.Mutex
 	engine        *Engine
 	prepared      preparedRequest
@@ -131,7 +137,7 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 		}
 		started := e.clock.Now()
 		attemptNumber++
-		upstream, normalized := e.openProviderStream(ctx, prepared.runtime.adapters[routeAttempt.Provider.ID], routeAttempt.Deployment, prepared.request, lease)
+		upstream, normalized := e.openProviderStream(ctx, prepared.runtime.adapters[routeAttempt.Provider.ID], routeAttempt.Deployment, statelessProviderRequest(prepared.request), lease)
 		if normalized != nil {
 			outcome := "failed"
 			if normalized.HTTPStatus == 499 {
@@ -226,6 +232,14 @@ func (s *GatewayStream) Next(ctx context.Context) (contract.StreamEvent, error) 
 		}
 		s.committed = true
 		event.OutputCommitted = true
+		if err := s.storeResponseEvent(ctx, &event); err != nil {
+			normalized := normalizeError(err, contract.ErrorUnavailable, 503, false)
+			if finishErr := s.finishLocked(ctx, "failed", normalized.HTTPStatus, normalized.Code, false); finishErr != nil {
+				return contract.StreamEvent{}, finishErr
+			}
+			return contract.StreamEvent{}, normalized
+		}
+		s.captureEvent(event)
 		if event.Terminal {
 			if err := s.finishLocked(ctx, "succeeded", 200, "", false); err != nil {
 				return contract.StreamEvent{}, err
@@ -263,12 +277,57 @@ func (s *GatewayStream) Next(ctx context.Context) (contract.StreamEvent, error) 
 		return contract.StreamEvent{}, normalized
 	}
 	event.OutputCommitted = s.committed
+	if err := s.storeResponseEvent(ctx, &event); err != nil {
+		normalized := normalizeError(err, contract.ErrorUnavailable, 503, false)
+		if finishErr := s.finishLocked(ctx, "failed", normalized.HTTPStatus, normalized.Code, false); finishErr != nil {
+			return contract.StreamEvent{}, finishErr
+		}
+		return contract.StreamEvent{}, normalized
+	}
+	s.captureEvent(event)
 	if event.Terminal {
 		if finishErr := s.finishLocked(ctx, "succeeded", 200, "", false); finishErr != nil {
 			return contract.StreamEvent{}, finishErr
 		}
 	}
 	return event, nil
+}
+
+func (s *GatewayStream) storeResponseEvent(ctx context.Context, event *contract.StreamEvent) error {
+	if event.Terminal && event.Response != nil {
+		s.finalResponse = event.Response.Snapshot
+		if s.finalResponse != nil {
+			s.finalResponse.Model = s.prepared.request.PublicModel
+			s.finalResponse.RequestID = s.prepared.request.ID
+		}
+	}
+	if s.prepared.responseID == "" {
+		return nil
+	}
+	if event.Terminal && (event.Response == nil || event.Response.Snapshot == nil || event.Response.Snapshot.Responses == nil) {
+		return publicError(contract.ErrorProvider, "stored response stream has no terminal snapshot", 502, false, nil)
+	}
+	if event.Response == nil {
+		return nil
+	}
+	delta := event.Response
+	delta.ResponseID = string(s.prepared.responseID)
+	if delta.Snapshot != nil && delta.Snapshot.Responses != nil {
+		delta.Snapshot.Responses.ID = string(s.prepared.responseID)
+		delta.Snapshot.Model = s.prepared.request.PublicModel
+		delta.Snapshot.Responses.Store = true
+		delta.Snapshot.Responses.PreviousResponseID = s.prepared.request.Responses.PreviousResponseID
+		if event.Terminal {
+			usage, err := settledUsage(delta.Snapshot.Usage, s.prepared.request.EstimatedUsage, s.route.Deployment.Pricing)
+			if err != nil {
+				return err
+			}
+			delta.Snapshot.Usage = usage
+			event.Usage = &delta.Snapshot.Usage
+			return s.engine.saveResponse(ctx, s.prepared, delta.Snapshot)
+		}
+	}
+	return nil
 }
 
 func (s *GatewayStream) observeUsage(usage *contract.Usage) {
@@ -307,7 +366,7 @@ func (s *GatewayStream) cancelLocked(ctx context.Context, reason string) error {
 	if aggregateErr != nil {
 		total = s.prepared.reserved
 	}
-	err := s.engine.cancelPrepared(ctx, s.prepared, contract.Cancellation{Token: s.prepared.token, Reason: reason, Usage: total, Attempts: s.attempts, EndedAt: ended})
+	err := s.engine.cancelPrepared(ctx, s.prepared, contract.Cancellation{StreamEvents: s.captured, StreamBytes: s.streamBytes, Token: s.prepared.token, Reason: reason, Usage: total, Attempts: s.attempts, EndedAt: ended})
 	s.terminal = true
 	if err != nil {
 		return err
@@ -352,7 +411,7 @@ func (s *GatewayStream) finishLocked(ctx context.Context, status string, httpSta
 		total = s.prepared.reserved
 	}
 	if err := s.engine.finalizePrepared(ctx, s.prepared, contract.Completion{
-		Token: s.prepared.token, Status: status, HTTPStatus: httpStatus, ErrorCode: code,
+		Response: s.finalResponse, StreamEvents: s.captured, StreamBytes: s.streamBytes, Token: s.prepared.token, Status: status, HTTPStatus: httpStatus, ErrorCode: code,
 		Usage: total, Attempts: s.attempts, FirstByteAt: s.firstByteAt, EndedAt: ended,
 	}); err != nil {
 		return err
@@ -380,4 +439,25 @@ func terminalStreamAttempt(number int, route routing.Attempt, started, ended tim
 		StartedAt: started, EndedAt: ended, Outcome: outcome, ErrorCode: err.Code,
 		HTTPStatus: err.HTTPStatus, Retryable: err.Retryable, OutputCommitted: committed, Usage: usage,
 	}
+}
+
+func (s *GatewayStream) captureEvent(event contract.StreamEvent) {
+	if s.prepared.token.CaptureLimit <= 0 {
+		return
+	}
+	body, err := json.Marshal(event)
+	if err != nil {
+		return
+	}
+	s.streamBytes += len(body)
+	if s.captureFull || s.capturedBytes+len(body) > s.prepared.token.CaptureLimit {
+		s.captureFull = true
+		return
+	}
+	var copy contract.StreamEvent
+	if json.Unmarshal(body, &copy) != nil {
+		return
+	}
+	s.captured = append(s.captured, copy)
+	s.capturedBytes += len(body)
 }

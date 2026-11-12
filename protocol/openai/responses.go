@@ -223,8 +223,11 @@ func (h *Handler) canonicalResponse(ctx context.Context, principal contract.Prin
 	if strings.TrimSpace(wire.Model) == "" || len(bytes.TrimSpace(wire.Input)) == 0 {
 		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "model and input are required", http.StatusBadRequest, false, nil)
 	}
-	if (wire.Store != nil && *wire.Store) || (wire.Background != nil && *wire.Background) || wire.PreviousResponseID != nil {
-		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "stateful responses are not supported", http.StatusBadRequest, false, nil)
+	if wire.Background != nil && *wire.Background {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "background responses are not supported", http.StatusBadRequest, false, nil)
+	}
+	if wire.PreviousResponseID != nil && strings.TrimSpace(*wire.PreviousResponseID) == "" {
+		return contract.Request{}, gatewayError(contract.ErrorInvalidRequest, "previous_response_id must not be empty", http.StatusBadRequest, false, nil)
 	}
 	var maximum int64
 	if wire.MaxOutputTokens != nil {
@@ -246,6 +249,10 @@ func (h *Handler) canonicalResponse(ctx context.Context, principal contract.Prin
 	}
 	requestBytes += resolvedBytes
 	canonical := &contract.ResponsesRequest{Instructions: wire.Instructions, Input: input, Include: append([]string(nil), wire.Include...)}
+	canonical.Store = wire.Store != nil && *wire.Store
+	if wire.PreviousResponseID != nil {
+		canonical.PreviousResponseID = *wire.PreviousResponseID
+	}
 	for _, tool := range wire.Tools {
 		converted, err := convertResponseTool(tool)
 		if err != nil {
@@ -546,11 +553,18 @@ func encodeResponse(response contract.Response) (map[string]any, error) {
 		}
 		output = append(output, encoded)
 	}
-	return map[string]any{
+	result := map[string]any{
 		"id": response.Responses.ID, "object": "response", "status": response.Responses.Status,
 		"model": response.Model, "output": output,
 		"usage": encodeResponsesUsage(response.Usage),
-	}, nil
+	}
+	if response.Responses.Store {
+		result["store"] = true
+	}
+	if response.Responses.PreviousResponseID != "" {
+		result["previous_response_id"] = response.Responses.PreviousResponseID
+	}
+	return result, nil
 }
 
 func encodeCompactedResponse(response contract.Response) (map[string]any, error) {
@@ -859,4 +873,47 @@ func encodeResponseEvent(request contract.Request, event contract.StreamEvent) (
 func writeResponseSSE(response io.Writer, event string, data []byte) error {
 	_, err := fmt.Fprintf(response, "event: %s\ndata: %s\n\n", event, data)
 	return err
+}
+
+func (h *Handler) getResponse(response http.ResponseWriter, request *http.Request) {
+	id, err := h.requestID(request)
+	if err != nil {
+		writeError(response, err, "")
+		return
+	}
+	principal, err := h.authenticate(request)
+	if err != nil {
+		writeError(response, err, id)
+		return
+	}
+	result, err := h.engine.GetResponse(request.Context(), principal, contract.ID(request.PathValue("id")))
+	if err != nil {
+		writeError(response, err, id)
+		return
+	}
+	encoded, err := encodeResponse(result)
+	if err != nil {
+		writeError(response, err, id)
+		return
+	}
+	writeJSON(response, http.StatusOK, id, encoded)
+}
+
+func (h *Handler) deleteResponse(response http.ResponseWriter, request *http.Request) {
+	id, err := h.requestID(request)
+	if err != nil {
+		writeError(response, err, "")
+		return
+	}
+	principal, err := h.authenticate(request)
+	if err != nil {
+		writeError(response, err, id)
+		return
+	}
+	responseID := contract.ID(request.PathValue("id"))
+	if err := h.engine.DeleteResponse(request.Context(), principal, responseID); err != nil {
+		writeError(response, err, id)
+		return
+	}
+	writeJSON(response, http.StatusOK, id, map[string]any{"id": responseID, "object": "response", "deleted": true})
 }

@@ -184,6 +184,7 @@ type Attempt struct {
 }
 
 type Admission struct {
+	Request        Request
 	RequestID      ID
 	Principal      Principal
 	ModelID        ID
@@ -193,26 +194,32 @@ type Admission struct {
 }
 
 type ReservationToken struct {
-	RequestID ID
-	Opaque    string
+	CaptureLimit int
+	RequestID    ID
+	Opaque       string
 }
 
 type Completion struct {
-	Token       ReservationToken
-	Status      string
-	HTTPStatus  int
-	ErrorCode   ErrorCode
-	Usage       Usage
-	Attempts    []Attempt
-	FirstByteAt time.Time
-	EndedAt     time.Time
-	CacheStatus string
+	Response     *Response
+	StreamEvents []StreamEvent
+	StreamBytes  int
+	Token        ReservationToken
+	Status       string
+	HTTPStatus   int
+	ErrorCode    ErrorCode
+	Usage        Usage
+	Attempts     []Attempt
+	FirstByteAt  time.Time
+	EndedAt      time.Time
+	CacheStatus  string
 }
 
 type Cancellation struct {
-	Token    ReservationToken
-	Reason   string
-	Usage    Usage
-	Attempts []Attempt
-	EndedAt  time.Time
+	StreamEvents []StreamEvent
+	StreamBytes  int
+	Token        ReservationToken
+	Reason       string
+	Usage        Usage
+	Attempts     []Attempt
+	EndedAt      time.Time
 }

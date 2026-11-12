@@ -26,6 +26,8 @@ type Engine interface {
 	Stream(context.Context, contract.Principal, contract.Request) (contract.EventStream, error)
 	Snapshot() (*catalog.Snapshot, error)
 	Authorize(context.Context, contract.Principal, string) error
+	GetResponse(context.Context, contract.Principal, contract.ID) (contract.Response, error)
+	DeleteResponse(context.Context, contract.Principal, contract.ID) error
 }
 
 type Authenticator interface {
@@ -79,6 +81,8 @@ func NewHandler(engine Engine, authenticator Authenticator, options Options) (*H
 	handler.mux.HandleFunc("POST /v1/completions", handler.completions)
 	handler.mux.HandleFunc("POST /v1/responses", handler.responses)
 	handler.mux.HandleFunc("POST /v1/responses/compact", handler.compactResponses)
+	handler.mux.HandleFunc("GET /v1/responses/{id}", handler.getResponse)
+	handler.mux.HandleFunc("DELETE /v1/responses/{id}", handler.deleteResponse)
 	handler.mux.HandleFunc("POST /v1/embeddings", handler.embeddings)
 	handler.mux.HandleFunc("POST /v1/images/generations", handler.imageGenerations)
 	handler.mux.HandleFunc("POST /v1/images/edits", handler.imageEdits)

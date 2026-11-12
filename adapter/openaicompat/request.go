@@ -855,8 +855,19 @@ func encodeResponseInput(items []contract.ResponseInputItem) []map[string]any {
 			parts := make([]map[string]any, 0, len(item.Content))
 			for _, part := range item.Content {
 				encoded := map[string]any{"type": part.Type}
-				if part.Type == "input_text" {
+				if part.Type == "input_text" || part.Type == "output_text" {
 					encoded["text"] = part.Text
+					if part.Type == "output_text" {
+						encoded["annotations"] = []any{}
+						if len(part.Annotations) != 0 {
+							encoded["annotations"] = json.RawMessage(part.Annotations)
+						}
+						if len(part.Logprobs) != 0 {
+							encoded["logprobs"] = json.RawMessage(part.Logprobs)
+						}
+					}
+				} else if part.Type == "refusal" {
+					encoded["refusal"] = part.Refusal
 				} else if part.Type == "input_image" {
 					encoded["image_url"] = part.ImageURL.URL
 					if part.ImageURL.Detail != "" {
@@ -881,6 +892,29 @@ func encodeResponseInput(items []contract.ResponseInputItem) []map[string]any {
 			value["call_id"], value["output"] = item.CallID, item.Output
 		case "compaction":
 			value["encrypted_content"] = item.EncryptedContent
+		case "reasoning":
+			parts := make([]map[string]any, 0, len(item.Summary))
+			for _, part := range item.Summary {
+				parts = append(parts, map[string]any{"type": part.Type, "text": part.Text})
+			}
+			value["summary"] = parts
+			if item.EncryptedContent != "" {
+				value["encrypted_content"] = item.EncryptedContent
+			}
+			if item.Content != nil {
+				content := make([]map[string]any, 0, len(item.Content))
+				for _, part := range item.Content {
+					content = append(content, map[string]any{"type": part.Type, "text": part.Text})
+				}
+				value["content"] = content
+			}
+		case "web_search_call":
+			if len(item.Action) != 0 {
+				value["action"] = json.RawMessage(item.Action)
+			}
+		}
+		if item.Status != "" {
+			value["status"] = item.Status
 		}
 		result = append(result, value)
 	}

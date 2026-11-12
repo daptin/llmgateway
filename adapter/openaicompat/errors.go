@@ -35,8 +35,7 @@ func (a *Adapter) providerError(response *http.Response) error {
 		code = contract.ErrorInsufficientQuota
 		message = "upstream provider quota is exhausted"
 	case http.StatusNotFound:
-		code = contract.ErrorModelNotFound
-		message = "upstream model not found"
+		message = "upstream endpoint or model not found"
 	case http.StatusTooManyRequests:
 		code = contract.ErrorRateLimit
 		message = "upstream provider rate limited the request"

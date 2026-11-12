@@ -99,6 +99,9 @@ func dropOptionalCapability(request contract.Request, capability string) (contra
 			chat.ReasoningEffort = ""
 			request.Chat = &chat
 		case contract.OperationResponses:
+			if responsesUseReasoning(request.Responses.Input) {
+				return contract.Request{}, fmt.Errorf("reasoning history is semantic input")
+			}
 			responses := *request.Responses
 			responses.ReasoningEffort = ""
 			responses.ReasoningSummary = ""
@@ -179,7 +182,7 @@ func requiredAdapterFeatures(request contract.Request) []string {
 		if request.Responses.ParallelToolCalls != nil {
 			add("parallel_tools")
 		}
-		if request.Responses.ReasoningEffort != "" || request.Responses.ReasoningSummary != "" {
+		if request.Responses.ReasoningEffort != "" || request.Responses.ReasoningSummary != "" || responsesUseReasoning(request.Responses.Input) {
 			add("reasoning")
 		}
 		if request.Responses.TopLogprobs != nil {
@@ -240,7 +243,7 @@ func messagesUsePart(messages []contract.Message, kind string) bool {
 
 func responsesUseTools(items []contract.ResponseInputItem) bool {
 	for _, item := range items {
-		if item.Type == "function_call" || item.Type == "function_call_output" {
+		if item.Type == "function_call" || item.Type == "function_call_output" || item.Type == "web_search_call" {
 			return true
 		}
 	}
@@ -253,6 +256,15 @@ func responsesUsePart(items []contract.ResponseInputItem, kind string) bool {
 			if part.Type == kind {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func responsesUseReasoning(items []contract.ResponseInputItem) bool {
+	for _, item := range items {
+		if item.Type == "reasoning" {
+			return true
 		}
 	}
 	return false

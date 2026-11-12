@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -554,7 +555,7 @@ func TestProviderErrorsAreNormalizedAndSecretSafe(t *testing.T) {
 		{name: "authentication", status: http.StatusUnauthorized, code: contract.ErrorAuthentication},
 		{name: "permission", status: http.StatusForbidden, code: contract.ErrorPermission},
 		{name: "quota", status: http.StatusPaymentRequired, code: contract.ErrorInsufficientQuota},
-		{name: "model", status: http.StatusNotFound, code: contract.ErrorModelNotFound},
+		{name: "endpoint or model", status: http.StatusNotFound, code: contract.ErrorProvider},
 		{name: "request timeout", status: http.StatusRequestTimeout, code: contract.ErrorTimeout, retryable: true},
 		{name: "conflict", status: http.StatusConflict, code: contract.ErrorProvider, retryable: true},
 		{name: "unprocessable", status: http.StatusUnprocessableEntity, code: contract.ErrorInvalidRequest},
@@ -590,6 +591,51 @@ func TestProviderErrorsAreNormalizedAndSecretSafe(t *testing.T) {
 			safe := typed.Safe()
 			if safe.Cause != nil || strings.Contains(safe.Error(), "raw provider") || strings.Contains(safe.Error(), "secret-key") {
 				t.Fatalf("public error leaked provider data: %#v", safe)
+			}
+		})
+	}
+}
+
+func TestMissingResponsesEndpointDoesNotImplyMissingModel(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil || body["model"] != "upstream-model" {
+			t.Errorf("unexpected upstream request body: %#v, error: %v", body, err)
+			http.Error(response, "invalid model", http.StatusBadRequest)
+			return
+		}
+		if request.URL.Path == "/v1/chat/completions" {
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(response, `{"id":"chat_1","created":1,"choices":[{"index":0,"message":{"role":"assistant","content":"OK"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`)
+			return
+		}
+		http.NotFound(response, request)
+	}))
+	defer server.Close()
+	adapter := buildAdapter(t, server, `{}`, Factory{})
+	defer adapter.CloseIdleConnections()
+	_, err := adapter.Invoke(context.Background(), deployment(), contract.Request{
+		Operation: contract.OperationChat,
+		Chat:      &contract.ChatRequest{Messages: []contract.Message{{Role: "user", Content: []contract.ContentPart{{Type: "text", Text: "hello"}}}}},
+	})
+	if err != nil {
+		t.Fatalf("valid model chat failed: %v", err)
+	}
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			request := contract.Request{Operation: contract.OperationResponses, Stream: stream,
+				Responses: &contract.ResponsesRequest{Input: []contract.ResponseInputItem{{Type: "message", Role: "user", Content: []contract.ContentPart{{Type: "input_text", Text: "hello"}}}}},
+			}
+			var err error
+			if stream {
+				_, err = adapter.Stream(context.Background(), deployment(), request)
+			} else {
+				_, err = adapter.Invoke(context.Background(), deployment(), request)
+			}
+			var typed *contract.Error
+			if !errors.As(err, &typed) || typed.Code != contract.ErrorProvider || typed.HTTPStatus != http.StatusNotFound ||
+				typed.Message != "upstream endpoint or model not found" || typed.Retryable {
+				t.Fatalf("missing endpoint error = %#v", err)
 			}
 		})
 	}

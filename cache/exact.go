@@ -43,7 +43,7 @@ func Eligible(model catalog.Model, request contract.Request, guardrailsStable bo
 		return request.Chat != nil && request.Chat.N == 1 && request.Chat.Temperature != nil && *request.Chat.Temperature == 0 &&
 			len(request.Chat.Tools) == 0 && (request.Chat.Store == nil || !*request.Chat.Store)
 	case contract.OperationResponses:
-		return request.Responses != nil && len(request.Responses.Tools) == 0
+		return request.Responses != nil && !request.Responses.Store && request.Responses.PreviousResponseID == "" && len(request.Responses.Tools) == 0
 	case contract.OperationTextCompletion:
 		return request.TextCompletion != nil && request.TextCompletion.N == 1 && request.TextCompletion.BestOf == 1 &&
 			request.TextCompletion.Temperature != nil && *request.TextCompletion.Temperature == 0

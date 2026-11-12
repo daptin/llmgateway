@@ -446,3 +446,10 @@ func TestRequestIDGeneratorFailureIsSafe(t *testing.T) {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 	}
 }
+
+func (f *fakeEngine) GetResponse(_ context.Context, _ contract.Principal, _ contract.ID) (contract.Response, error) {
+	return f.invokeResult, f.invokeErr
+}
+func (f *fakeEngine) DeleteResponse(_ context.Context, _ contract.Principal, _ contract.ID) error {
+	return f.invokeErr
+}

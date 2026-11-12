@@ -133,7 +133,7 @@ func (r Request) Validate() error {
 			}
 		}
 		if r.Operation == OperationResponseCompact {
-			if len(r.Responses.Tools) != 0 || r.Responses.ToolChoice != nil || r.Responses.TextFormat != nil ||
+			if r.Responses.Store || r.Responses.PreviousResponseID != "" || len(r.Responses.Tools) != 0 || r.Responses.ToolChoice != nil || r.Responses.TextFormat != nil ||
 				r.Responses.Temperature != nil || r.Responses.TopP != nil || r.Responses.ParallelToolCalls != nil ||
 				r.Responses.ReasoningEffort != "" || r.Responses.ReasoningSummary != "" || r.Responses.SafetyIdentifier != "" ||
 				r.Responses.Truncation != "" || r.Responses.User != "" || r.Responses.TopLogprobs != nil || r.MaxOutputTokens != 0 {
@@ -474,6 +474,10 @@ func validateResponseInput(item ResponseInputItem) error {
 				if part.Text == "" {
 					return errors.New("response input text cannot be empty")
 				}
+			case "output_text", "refusal":
+				if item.Role != "assistant" || (part.Type == "refusal" && part.Refusal == "") {
+					return errors.New("response output content requires an assistant message")
+				}
 			case "input_image":
 				if part.ImageURL == nil || part.ImageURL.URL == "" {
 					return errors.New("response input image requires a URL")
@@ -503,6 +507,21 @@ func validateResponseInput(item ResponseInputItem) error {
 	case "compaction":
 		if item.EncryptedContent == "" {
 			return errors.New("response compaction item requires encrypted content")
+		}
+	case "reasoning":
+		for _, part := range item.Summary {
+			if part.Type != "summary_text" {
+				return errors.New("invalid reasoning summary")
+			}
+		}
+		for _, part := range item.Content {
+			if part.Type != "reasoning_text" {
+				return errors.New("invalid reasoning content")
+			}
+		}
+	case "web_search_call":
+		if item.ID == "" || item.Status == "" || (len(item.Action) != 0 && !ValidJSONObject(item.Action)) {
+			return errors.New("invalid response web search history")
 		}
 	default:
 		return errors.New("unsupported response input item")

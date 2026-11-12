@@ -148,7 +148,7 @@ func TestImageVariationRejectsInvalidMultipartInput(t *testing.T) {
 	}
 }
 
-func TestResponsesRejectStateAndPreserveTypedInput(t *testing.T) {
+func TestResponsesRejectBackgroundAndPreserveTypedInput(t *testing.T) {
 	engine := &fakeEngine{snapshot: testSnapshot(t), invokeResult: contract.Response{
 		Model: "allowed", Responses: &contract.ResponsesResponse{ID: "resp_1", Status: "completed", Output: []contract.ResponseOutputItem{{
 			Type: "message", ID: "msg_1", Role: "assistant", Status: "completed", Content: []contract.ContentPart{{Type: "output_text", Text: "sunny"}},
@@ -156,13 +156,12 @@ func TestResponsesRejectStateAndPreserveTypedInput(t *testing.T) {
 	}}
 	handler := testHandler(t, engine, fakeAuthenticator{})
 	for _, body := range []string{
-		`{"model":"allowed","input":"hello","store":true}`,
 		`{"model":"allowed","input":"hello","background":true}`,
 		`{"model":"allowed","input":"hello","previous_response_id":""}`,
 	} {
 		stateful := perform(handler, http.MethodPost, "/v1/responses", body, "key")
-		if stateful.Code != http.StatusBadRequest || !strings.Contains(stateful.Body.String(), "stateful responses") {
-			t.Fatalf("stateful request was not explicitly rejected: %d %s", stateful.Code, stateful.Body.String())
+		if stateful.Code != http.StatusBadRequest || !strings.Contains(stateful.Body.String(), "invalid_request") {
+			t.Fatalf("unsupported request was not explicitly rejected: %d %s", stateful.Code, stateful.Body.String())
 		}
 	}
 	body := `{"model":"allowed","instructions":"be concise","input":[{"type":"message","role":"user","content":[{"type":"input_text","text":"weather"},{"type":"input_image","image_url":"https://example.test/sky.png","detail":"low"},{"type":"input_file","file_data":"data:application/pdf;base64,cGRm","filename":"brief.pdf"}]},{"type":"function_call_output","call_id":"call_1","output":"sunny"}],"tools":[{"type":"function","name":"weather","parameters":{"type":"object"}}],"tool_choice":{"type":"function","name":"weather"},"text":{"format":{"type":"json_schema","name":"forecast","schema":{"type":"object"}}},"temperature":0.4,"top_p":0.8,"parallel_tool_calls":false,"reasoning":{"effort":"low","summary":"concise"},"max_output_tokens":20,"store":false,"background":false,"prompt_cache_key":"tenant-thread","safety_identifier":"safe-user","service_tier":"priority","truncation":"disabled","user":"legacy-user","top_logprobs":3}`
@@ -483,5 +482,21 @@ func assertJSONEqual(t *testing.T, got, want string) {
 	wantJSON, _ := json.Marshal(wantValue)
 	if string(gotJSON) != string(wantJSON) {
 		t.Fatalf("JSON mismatch\n got: %s\nwant: %s", gotJSON, wantJSON)
+	}
+}
+
+func TestResponsesDecodeStoredContinuation(t *testing.T) {
+	engine := &fakeEngine{snapshot: testSnapshot(t), invokeResult: contract.Response{Model: "allowed", Responses: &contract.ResponsesResponse{ID: "stored", Status: "completed", Store: true}}}
+	for _, body := range []string{
+		`{"model":"allowed","input":"hello","store":true}`,
+		`{"model":"allowed","input":"next","store":true,"previous_response_id":"stored-previous"}`,
+	} {
+		response := perform(testHandler(t, engine, fakeAuthenticator{}), http.MethodPost, "/v1/responses", body, "key")
+		if response.Code != 200 || engine.invokeRequest.Responses == nil || !engine.invokeRequest.Responses.Store {
+			t.Fatalf("stored request: status=%d request=%#v body=%s", response.Code, engine.invokeRequest, response.Body.String())
+		}
+		if strings.Contains(body, "stored-previous") && engine.invokeRequest.Responses.PreviousResponseID != "stored-previous" {
+			t.Fatal("continuation reference was lost")
+		}
 	}
 }

@@ -98,11 +98,21 @@
         "truncation": "translated",
         "user": "translated",
         "top_logprobs": "translated",
-        "store": "rejected",
+        "store": "translated",
         "background": "rejected",
-        "previous_response_id": "rejected"
+        "previous_response_id": "translated"
       },
-      "response_fields": {"id":"translated","object":"native","status":"translated","model":"native","output":"translated","usage":"translated"}
+      "response_fields": {"id":"translated","object":"native","status":"translated","model":"native","output":"translated","usage":"translated","store":"translated","previous_response_id":"translated"}
+    },
+    {
+      "method": "GET", "path": "/v1/responses/{id}",
+      "request_fields": {"id":"native"},
+      "response_fields": {"id":"native","object":"native","status":"native","model":"native","output":"native","usage":"native","store":"native","previous_response_id":"native"}
+    },
+    {
+      "method": "DELETE", "path": "/v1/responses/{id}",
+      "request_fields": {"id":"native"},
+      "response_fields": {"id":"native","object":"native","deleted":"native"}
     },
     {
       "method": "POST",
@@ -272,8 +282,6 @@
     {"method":"POST","path":"/utils/token_counter","reason":"requires the same tokenizer invariant as messages count_tokens"},
     {"method":"POST","path":"/v1beta/models/{model}:countTokens","reason":"requires a lossless Gemini CountTokens contract and provider-certified token accounting"},
     {"method":"GET","path":"/v1/search/tools","reason":"requires an authorized provider-backed search-tool discovery contract"},
-    {"method":"GET","path":"/v1/responses/{id}","reason":"stored Responses state is not owned by the stateless gateway module"},
-    {"method":"DELETE","path":"/v1/responses/{id}","reason":"stored Responses state is not owned by the stateless gateway module"},
     {"method":"POST","path":"/v1/responses/{id}/cancel","reason":"requires a durable background Responses lifecycle and ownership checks"},
     {"method":"GET","path":"/v1/responses/{id}/input_items","reason":"requires durable stored Response inputs and ownership checks"},
     {"method":"POST","path":"/v1/videos","reason":"requires a canonical asynchronous video job contract, durable media storage, and provider certification"},

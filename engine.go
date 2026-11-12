@@ -34,6 +34,7 @@ type Dependencies struct {
 	Telemetry  TelemetrySink
 	Selector   Selector
 	Clock      Clock
+	Responses  ResponseStore
 }
 
 type Options struct {
@@ -93,6 +94,7 @@ type Engine struct {
 	metering               MeteringPort
 	counters               CounterStore
 	cache                  ResponseCache
+	responses              ResponseStore
 	guardrails             *guardrail.Registry
 	telemetry              TelemetrySink
 	selector               Selector
@@ -218,6 +220,7 @@ func New(dependencies Dependencies, options Options) (*Engine, error) {
 	return &Engine{
 		catalog: dependencies.Catalog, secrets: dependencies.Secrets, adapters: dependencies.Adapters,
 		authorizer: dependencies.Authorizer, metering: dependencies.Metering, counters: dependencies.Counters, cache: dependencies.Cache,
+		responses:  dependencies.Responses,
 		guardrails: dependencies.Guardrails, telemetry: dependencies.Telemetry, selector: dependencies.Selector,
 		clock: dependencies.Clock, maxAttempts: options.MaxAttempts, defaultMaxOutputTokens: options.DefaultMaxOutputTokens, finalizationTimeout: options.FinalizationTimeout,
 		baseRetryDelay: options.BaseRetryDelay, maxRetryDelay: options.MaxRetryDelay,
@@ -544,7 +547,7 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 			}
 			return contract.Response{}, normalized
 		}
-		if finishErr := finish(contract.Completion{Token: prepared.token, Status: "succeeded", HTTPStatus: 200, Usage: cached.Usage, EndedAt: e.clock.Now(), CacheStatus: "hit"}); finishErr != nil {
+		if finishErr := finish(contract.Completion{Token: prepared.token, Response: &cached, Status: "succeeded", HTTPStatus: 200, Usage: cached.Usage, EndedAt: e.clock.Now(), CacheStatus: "hit"}); finishErr != nil {
 			return contract.Response{}, finishErr
 		}
 		return cached, nil
@@ -591,7 +594,7 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 		}
 		started := e.clock.Now()
 		attemptNumber++
-		response, normalized := e.invokeProvider(ctx, prepared.runtime.adapters[routeAttempt.Provider.ID], routeAttempt.Deployment, prepared.request, lease)
+		response, normalized := e.invokeProvider(ctx, prepared.runtime.adapters[routeAttempt.Provider.ID], routeAttempt.Deployment, statelessProviderRequest(prepared.request), lease)
 		ended := e.clock.Now()
 		if normalized != nil {
 			outcome := "failed"
@@ -651,7 +654,14 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 			}
 			return contract.Response{}, normalized
 		}
-		if err := finish(contract.Completion{Token: prepared.token, Status: "succeeded", HTTPStatus: 200, Usage: total, Attempts: attempts, EndedAt: ended}); err != nil {
+		if err := e.saveResponse(ctx, prepared, &response); err != nil {
+			normalized := normalizeError(err, contract.ErrorUnavailable, 503, false)
+			if finishErr := finish(contract.Completion{Token: prepared.token, Status: "failed", HTTPStatus: normalized.HTTPStatus, ErrorCode: normalized.Code, Usage: total, Attempts: attempts, EndedAt: ended}); finishErr != nil {
+				return contract.Response{}, finishErr
+			}
+			return contract.Response{}, normalized
+		}
+		if err := finish(contract.Completion{Token: prepared.token, Response: &response, Status: "succeeded", HTTPStatus: 200, Usage: total, Attempts: attempts, EndedAt: ended}); err != nil {
 			return contract.Response{}, err
 		}
 		e.storeCache(ctx, cacheKey, response)
@@ -669,6 +679,7 @@ type preparedRequest struct {
 	principal       contract.Principal
 	reserved        contract.Usage
 	attemptExposure []contract.Usage
+	responseID      contract.ID
 }
 
 func (e *Engine) prepare(ctx context.Context, principal contract.Principal, request contract.Request) (preparedRequest, error) {
@@ -693,6 +704,9 @@ func (e *Engine) resolve(ctx context.Context, principal contract.Principal, requ
 	model, ok := runtime.catalog.ModelByName(request.PublicModel)
 	if !ok || !model.Enabled {
 		return preparedRequest{}, publicError(contract.ErrorModelNotFound, "model not found", 404, false, nil)
+	}
+	if err := e.resolvePreviousResponse(ctx, principal, &request); err != nil {
+		return preparedRequest{}, err
 	}
 	request, err = runtime.catalog.ApplyDefaults(model.ID, request, e.defaultMaxOutputTokens)
 	if err != nil {
@@ -757,7 +771,7 @@ func (e *Engine) admitCached(ctx context.Context, principal contract.Principal, 
 
 func (e *Engine) reserve(ctx context.Context, principal contract.Principal, prepared preparedRequest, exposure contract.Usage) (preparedRequest, error) {
 	token, err := e.metering.Admit(ctx, contract.Admission{
-		RequestID: prepared.request.ID, Principal: principal, ModelID: prepared.model.ID, Operation: prepared.request.Operation,
+		Request: prepared.request, RequestID: prepared.request.ID, Principal: principal, ModelID: prepared.model.ID, Operation: prepared.request.Operation,
 		StartedAt: prepared.request.StartedAt, EstimatedUsage: exposure,
 	})
 	if err != nil {
@@ -768,6 +782,14 @@ func (e *Engine) reserve(ctx context.Context, principal contract.Principal, prep
 	}
 	prepared.token = token
 	prepared.reserved = exposure
+	if prepared.request.Responses != nil && prepared.request.Responses.Store {
+		id, err := e.responses.Begin(ctx, principal, token, prepared.request.Responses.PreviousResponseID)
+		if err != nil {
+			_ = e.cancelPrepared(ctx, prepared, contract.Cancellation{Token: token, Reason: "response_storage_unavailable", EndedAt: e.clock.Now()})
+			return preparedRequest{}, normalizeError(err, contract.ErrorUnavailable, 503, false)
+		}
+		prepared.responseID = id
+	}
 	return prepared, nil
 }
 
@@ -836,6 +858,9 @@ func (e *Engine) finalize(parent context.Context, completion contract.Completion
 
 func (e *Engine) finalizePrepared(parent context.Context, prepared preparedRequest, completion contract.Completion) error {
 	err := e.finalize(parent, completion)
+	if completion.Status != "succeeded" {
+		err = errors.Join(err, e.failStoredResponse(parent, prepared, "failed"))
+	}
 	e.recordTerminal(parent, prepared, completion.Status, completion.ErrorCode, completion.CacheStatus, completion.Usage, completion.Attempts, completion.EndedAt, err)
 	return err
 }
@@ -851,6 +876,7 @@ func (e *Engine) cancel(parent context.Context, cancellation contract.Cancellati
 
 func (e *Engine) cancelPrepared(parent context.Context, prepared preparedRequest, cancellation contract.Cancellation) error {
 	err := e.cancel(parent, cancellation)
+	err = errors.Join(err, e.failStoredResponse(parent, prepared, "cancelled"))
 	e.recordTerminal(parent, prepared, "cancelled", contract.ErrorProvider, "", cancellation.Usage, cancellation.Attempts, cancellation.EndedAt, err)
 	return err
 }

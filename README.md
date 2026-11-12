@@ -38,6 +38,24 @@ Explicit request values always take precedence. The routing strategy is
 typed manifest fields only when an eligible adapter declares support. Unknown
 wire fields are never accepted as arbitrary passthrough data.
 
+## Stored Responses
+
+Hosts can supply `Dependencies.Responses` as a permissioned durable
+`ResponseStore`. `store: true` reserves and saves a response through that port;
+`previous_response_id` resolves the saved input and output before capability
+checks, authorization, routing, and metering. Each continuation can select a new
+eligible deployment. Provider requests remain stateless, so history does not
+depend on provider-owned response IDs. GET and DELETE under `/v1/responses/{id}`
+use the same host store. Without a store, stateful requests fail closed;
+omitting `store` or setting it to false continues to support stateless callers.
+
+Admission receives the canonical request and returns an optional capture byte limit. Completion receives the canonical response or bounded stream events; cancellation includes captured partial events. Hosts can use these lifecycle facts to record HTTP, direct calls, and batch invocations through one capture path. `ResponseStore.Authorize` checks retention access before admission writes or quota reservation. `ResponseStore.Begin` receives the admission token so retained history can reuse that same record.
+
+The host controls ownership and retention. Replayed input and saved snapshots
+are bounded by `MaxResponseHistoryBytes`. Streaming responses reserve an ID
+before provider I/O and save the completed snapshot before exposing the terminal
+event. Background execution is not supported.
+
 ## Development
 
 ```sh
