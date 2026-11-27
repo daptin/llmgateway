@@ -87,7 +87,11 @@ func encodeMessage(message contract.Message) (map[string]any, error) {
 	if len(message.ToolCalls) > 0 {
 		calls := make([]map[string]any, 0, len(message.ToolCalls))
 		for _, call := range message.ToolCalls {
-			calls = append(calls, map[string]any{"id": call.ID, "type": call.Type, "function": map[string]any{"name": call.Function.Name, "arguments": call.Function.Arguments}})
+			encodedCall := map[string]any{"id": call.ID, "type": call.Type, "function": map[string]any{"name": call.Function.Name, "arguments": call.Function.Arguments}}
+			if len(call.ExtraContent) > 0 {
+				encodedCall["extra_content"] = call.ExtraContent
+			}
+			calls = append(calls, encodedCall)
 		}
 		encoded["tool_calls"] = calls
 	}
@@ -110,7 +114,11 @@ func encodeChatChunk(request contract.Request, event contract.StreamEvent, inclu
 		if len(event.Chat.ToolCalls) > 0 {
 			calls := make([]map[string]any, 0, len(event.Chat.ToolCalls))
 			for _, call := range event.Chat.ToolCalls {
-				calls = append(calls, map[string]any{"index": call.Index, "id": call.ID, "type": call.Type, "function": map[string]any{"name": call.Function.Name, "arguments": call.Function.Arguments}})
+				encodedCall := map[string]any{"index": call.Index, "id": call.ID, "type": call.Type, "function": map[string]any{"name": call.Function.Name, "arguments": call.Function.Arguments}}
+				if len(call.ExtraContent) > 0 {
+					encodedCall["extra_content"] = call.ExtraContent
+				}
+				calls = append(calls, encodedCall)
 			}
 			delta["tool_calls"] = calls
 		}

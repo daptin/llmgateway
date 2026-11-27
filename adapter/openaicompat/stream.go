@@ -196,10 +196,11 @@ type chatChunkWire struct {
 			Role      string `json:"role"`
 			Content   string `json:"content"`
 			ToolCalls []struct {
-				Index    int              `json:"index"`
-				ID       string           `json:"id"`
-				Type     string           `json:"type"`
-				Function functionCallWire `json:"function"`
+				Index        int              `json:"index"`
+				ID           string           `json:"id"`
+				Type         string           `json:"type"`
+				Function     functionCallWire `json:"function"`
+				ExtraContent json.RawMessage  `json:"extra_content,omitempty"`
 			} `json:"tool_calls"`
 		} `json:"delta"`
 		FinishReason *string         `json:"finish_reason"`
@@ -234,7 +235,10 @@ func decodeChatEvents(data []byte) ([]contract.StreamEvent, error) {
 		event := contract.StreamEvent{Type: "content_delta"}
 		delta := &contract.ChatDelta{ID: wire.ID, Created: wire.Created, Index: choice.Index, Role: choice.Delta.Role, Content: choice.Delta.Content, Logprobs: append([]byte(nil), choice.Logprobs...)}
 		for _, call := range choice.Delta.ToolCalls {
-			delta.ToolCalls = append(delta.ToolCalls, contract.ToolCallDelta{Index: call.Index, ID: call.ID, Type: call.Type, Function: contract.FunctionCall{Name: call.Function.Name, Arguments: call.Function.Arguments}})
+			if len(call.ExtraContent) > 0 && !contract.ValidJSONObject(call.ExtraContent) {
+				return nil, errors.New("upstream tool call extra content must be a JSON object")
+			}
+			delta.ToolCalls = append(delta.ToolCalls, contract.ToolCallDelta{Index: call.Index, ID: call.ID, Type: call.Type, Function: contract.FunctionCall{Name: call.Function.Name, Arguments: call.Function.Arguments}, ExtraContent: append(json.RawMessage(nil), call.ExtraContent...)})
 			event.Type = "tool_call_delta"
 		}
 		if choice.FinishReason != nil {

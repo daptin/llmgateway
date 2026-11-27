@@ -75,9 +75,10 @@ type functionCallWire struct {
 }
 
 type toolCallWire struct {
-	ID       string           `json:"id"`
-	Type     string           `json:"type"`
-	Function functionCallWire `json:"function"`
+	ID           string           `json:"id"`
+	Type         string           `json:"type"`
+	Function     functionCallWire `json:"function"`
+	ExtraContent json.RawMessage  `json:"extra_content,omitempty"`
 }
 
 type chatResponseWire struct {
@@ -237,7 +238,10 @@ func decodeResponse(operation contract.Operation, payload []byte) (contract.Resp
 				message.Content = []contract.ContentPart{{Type: "text", Text: text}}
 			}
 			for _, call := range choice.Message.ToolCalls {
-				message.ToolCalls = append(message.ToolCalls, contract.ToolCall{ID: call.ID, Type: call.Type, Function: contract.FunctionCall{Name: call.Function.Name, Arguments: call.Function.Arguments}})
+				if len(call.ExtraContent) > 0 && !contract.ValidJSONObject(call.ExtraContent) {
+					return contract.Response{}, providerFailure("upstream tool call extra content must be a JSON object", nil)
+				}
+				message.ToolCalls = append(message.ToolCalls, contract.ToolCall{ID: call.ID, Type: call.Type, Function: contract.FunctionCall{Name: call.Function.Name, Arguments: call.Function.Arguments}, ExtraContent: append(json.RawMessage(nil), call.ExtraContent...)})
 			}
 			result.Chat.Choices = append(result.Chat.Choices, contract.ChatChoice{Index: choice.Index, Message: message, FinishReason: choice.FinishReason, Logprobs: append([]byte(nil), choice.Logprobs...)})
 		}

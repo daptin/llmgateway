@@ -80,9 +80,10 @@ type functionDefinition struct {
 }
 
 type toolCall struct {
-	ID       string       `json:"id"`
-	Type     string       `json:"type"`
-	Function functionCall `json:"function"`
+	ID           string          `json:"id"`
+	Type         string          `json:"type"`
+	Function     functionCall    `json:"function"`
+	ExtraContent json.RawMessage `json:"extra_content,omitempty"`
 }
 
 type functionCall struct {
@@ -271,7 +272,7 @@ func convertMessage(message chatMessage) (contract.Message, error) {
 		if call.ID == "" || call.Type != "function" || call.Function.Name == "" {
 			return contract.Message{}, errors.New("invalid tool call")
 		}
-		converted.ToolCalls = append(converted.ToolCalls, contract.ToolCall{ID: call.ID, Type: call.Type, Function: contract.FunctionCall{Name: call.Function.Name, Arguments: call.Function.Arguments}})
+		converted.ToolCalls = append(converted.ToolCalls, contract.ToolCall{ID: call.ID, Type: call.Type, Function: contract.FunctionCall{Name: call.Function.Name, Arguments: call.Function.Arguments}, ExtraContent: append(json.RawMessage(nil), call.ExtraContent...)})
 	}
 	if message.Role == "tool" && message.ToolCallID == "" {
 		return contract.Message{}, errors.New("tool message requires tool_call_id")

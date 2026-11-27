@@ -96,6 +96,9 @@ type ToolCall struct {
 	ID       string
 	Type     string
 	Function FunctionCall
+	// ExtraContent is opaque provider continuation state attached to this call.
+	// Preserve it with history; it is never gateway policy or tool arguments.
+	ExtraContent json.RawMessage `json:",omitempty"`
 }
 
 type FunctionCall struct {
@@ -128,8 +131,9 @@ type ChatDelta struct {
 }
 
 type ToolCallDelta struct {
-	Index    int
-	ID       string
-	Type     string
-	Function FunctionCall
+	Index        int
+	ID           string
+	Type         string
+	Function     FunctionCall
+	ExtraContent json.RawMessage `json:",omitempty"`
 }

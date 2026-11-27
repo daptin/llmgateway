@@ -402,6 +402,9 @@ func validateMessages(messages []Message) error {
 			if call.ID == "" || call.Type != "function" || call.Function.Name == "" {
 				return errors.New("invalid message tool call")
 			}
+			if len(call.ExtraContent) > 0 && !ValidJSONObject(call.ExtraContent) {
+				return errors.New("tool call extra content must be a JSON object")
+			}
 		}
 	}
 	return nil

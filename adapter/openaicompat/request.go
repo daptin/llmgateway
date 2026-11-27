@@ -670,7 +670,11 @@ func encodeMessages(messages []contract.Message) []map[string]any {
 		if len(message.ToolCalls) > 0 {
 			calls := make([]map[string]any, 0, len(message.ToolCalls))
 			for _, call := range message.ToolCalls {
-				calls = append(calls, map[string]any{"id": call.ID, "type": call.Type, "function": map[string]any{"name": call.Function.Name, "arguments": call.Function.Arguments}})
+				encoded := map[string]any{"id": call.ID, "type": call.Type, "function": map[string]any{"name": call.Function.Name, "arguments": call.Function.Arguments}}
+				if len(call.ExtraContent) > 0 {
+					encoded["extra_content"] = call.ExtraContent
+				}
+				calls = append(calls, encoded)
 			}
 			value["tool_calls"] = calls
 		}

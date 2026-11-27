@@ -38,6 +38,14 @@ Explicit request values always take precedence. The routing strategy is
 typed manifest fields only when an eligible adapter declares support. Unknown
 wire fields are never accepted as arbitrary passthrough data.
 
+Chat tool calls explicitly support `extra_content` as an opaque JSON object for
+provider continuation state, including Google's thought signatures. The adapter,
+canonical `ToolCall`/`ToolCallDelta`, and OpenAI-compatible HTTP/SSE transport
+preserve it on its original call. Hosts that persist conversations must retain
+that field with the message and replay it unchanged after a restart. It is not
+tool arguments, gateway configuration, or an authorization source. Existing
+request/response size bounds apply.
+
 ## Stored Responses
 
 Hosts can supply `Dependencies.Responses` as a permissioned durable
