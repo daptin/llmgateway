@@ -183,14 +183,24 @@ type Attempt struct {
 	Usage           Usage
 }
 
+type ExposureQuote struct {
+	DeploymentID ID
+	Rates        map[string]int64
+	Usage        Usage
+}
+
 type Admission struct {
-	Request        Request
-	RequestID      ID
-	Principal      Principal
-	ModelID        ID
-	Operation      Operation
-	StartedAt      time.Time
-	EstimatedUsage Usage
+	TokensBounded   bool
+	PricesKnown     bool
+	PricingRevision uint64
+	Quotes          []ExposureQuote
+	Request         Request
+	RequestID       ID
+	Principal       Principal
+	ModelID         ID
+	Operation       Operation
+	StartedAt       time.Time
+	EstimatedUsage  Usage
 }
 
 type ReservationToken struct {

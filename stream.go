@@ -104,7 +104,7 @@ func (e *Engine) Stream(ctx context.Context, principal contract.Principal, reque
 		if reported == nil {
 			return prepared.attemptExposure[index]
 		}
-		settled, settleErr := settledUsage(*reported, prepared.request.EstimatedUsage, route.Deployment.Pricing)
+		settled, settleErr := prepared.settledUsage(*reported, route.Deployment.Pricing)
 		if settleErr != nil || !settled.Valid() {
 			return prepared.attemptExposure[index]
 		}
@@ -318,7 +318,7 @@ func (s *GatewayStream) storeResponseEvent(ctx context.Context, event *contract.
 		delta.Snapshot.Responses.Store = true
 		delta.Snapshot.Responses.PreviousResponseID = s.prepared.request.Responses.PreviousResponseID
 		if event.Terminal {
-			usage, err := settledUsage(delta.Snapshot.Usage, s.prepared.request.EstimatedUsage, s.route.Deployment.Pricing)
+			usage, err := s.prepared.settledUsage(delta.Snapshot.Usage, s.route.Deployment.Pricing)
 			if err != nil {
 				return err
 			}
@@ -352,7 +352,7 @@ func (s *GatewayStream) cancelLocked(ctx context.Context, reason string) error {
 	closeErr := closeProviderStream(s.upstream)
 	s.engine.releaseAttemptLease(ctx, s.lease)
 	ended := s.engine.clock.Now()
-	usage, usageErr := settledUsage(s.usage, s.prepared.request.EstimatedUsage, s.route.Deployment.Pricing)
+	usage, usageErr := s.prepared.settledUsage(s.usage, s.route.Deployment.Pricing)
 	if usageErr != nil || !usage.Valid() {
 		usage = s.reservedUsage
 	}
@@ -378,7 +378,7 @@ func (s *GatewayStream) finishLocked(ctx context.Context, status string, httpSta
 	defer s.releaseRequest()
 	s.terminal = true
 	ended := s.engine.clock.Now()
-	usage, usageErr := settledUsage(s.usage, s.prepared.request.EstimatedUsage, s.route.Deployment.Pricing)
+	usage, usageErr := s.prepared.settledUsage(s.usage, s.route.Deployment.Pricing)
 	if usageErr != nil || !usage.Valid() {
 		status = "failed"
 		httpStatus = 502

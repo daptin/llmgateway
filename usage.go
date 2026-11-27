@@ -1,6 +1,7 @@
 package llmgateway
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 
@@ -174,4 +175,73 @@ func addUsage(left, right contract.Usage) (contract.Usage, error) {
 		ReasoningTokens: sums[4], TotalTokens: sums[5], CostMicros: sums[6], Estimated: left.Estimated || right.Estimated,
 		Measures: measures,
 	}, nil
+}
+
+// textExposureBounded excludes provider-sized media and native external tools.
+func textExposureBounded(request contract.Request) bool {
+	if request.Operation != contract.OperationChat || request.Chat == nil || request.Chat.MaxCompletionTokens <= 0 {
+		return false
+	}
+	for _, message := range request.Chat.Messages {
+		for _, part := range message.Content {
+			if part.Type != "text" && part.Type != "input_text" && part.Type != "output_text" && part.Type != "refusal" {
+				return false
+			}
+		}
+	}
+	for _, tool := range request.Chat.Tools {
+		if tool.Type != "function" {
+			return false
+		}
+	}
+	return true
+}
+
+// Token pricing must cover input and output, or total tokens alone. Zero is an
+// explicit free rate; an omitted price is not free. Mixed/category-specific
+// schedules are not accepted as a complete price for a budgeted text request.
+func tokenPricesKnown(pricing catalog.Pricing) bool {
+	_, total := pricing.Rates["total_tokens"]
+	_, input := pricing.Rates["input_tokens"]
+	_, output := pricing.Rates["output_tokens"]
+	if total {
+		return len(pricing.Rates) == 1
+	}
+	if !input || !output {
+		return false
+	}
+	return len(pricing.Rates) == 2
+}
+
+func applyBoundedTextExposure(request *contract.Request) error {
+	if !textExposureBounded(*request) {
+		return nil
+	}
+	raw, err := json.Marshal(request.Chat)
+	if err != nil {
+		return err
+	}
+	input := int64(len(raw)) + 256*int64(len(request.Chat.Messages)+len(request.Chat.Tools)+1)
+	if request.EstimatedUsage.InputTokens < input {
+		request.EstimatedUsage.InputTokens = input
+	}
+	request.EstimatedUsage.Estimated = true
+	return normalizeTokenTotal(&request.EstimatedUsage)
+}
+
+// In a budgeted text request an absent category must not become free exposure.
+// Zero cannot prove absence versus a provider's omitted field, so retain that
+// category's conservative estimate and identify the settlement as estimated.
+func (prepared preparedRequest) settledUsage(reported contract.Usage, pricing catalog.Pricing) (contract.Usage, error) {
+	if prepared.boundedTokens {
+		if reported.InputTokens == 0 {
+			reported.InputTokens = prepared.request.EstimatedUsage.InputTokens
+			reported.Estimated = true
+		}
+		if reported.OutputTokens == 0 {
+			reported.OutputTokens = prepared.request.EstimatedUsage.OutputTokens
+			reported.Estimated = true
+		}
+	}
+	return settledUsage(reported, prepared.request.EstimatedUsage, pricing)
 }

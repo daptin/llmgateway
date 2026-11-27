@@ -866,3 +866,45 @@ func TestDrainWaitsForAdmittedStreamAndRejectsNewWork(t *testing.T) {
 		t.Fatalf("stream metering state=%s", state)
 	}
 }
+
+func TestBudgetExposureQuotesEveryFallbackBeforeProviderDispatch(t *testing.T) {
+	document := testDocument()
+	document.Deployments[0].Pricing = catalog.Pricing{Rates: map[string]int64{"input_tokens": 1000000, "output_tokens": 2000000}}
+	second := document.Deployments[0]
+	second.ID, second.Name = "d2", "second"
+	second.Pricing = catalog.Pricing{Rates: map[string]int64{"total_tokens": 3000000}}
+	document.Deployments = append(document.Deployments, second)
+	provider := testkit.NewFaultAdapter(adapter.Capabilities{Operations: map[contract.Operation]bool{contract.OperationChat: true}})
+	store := testkit.NewMeteringRecorder()
+	store.RejectAdmissions(llmgateway.ErrAdmissionDenied)
+	engine := newEngineForDocument(t, document, provider, store)
+	ctx := contract.WithBoundedTokenExposure(context.Background())
+	if err := engine.Reload(ctx); err != nil {
+		t.Fatal(err)
+	}
+	request := chatRequest("bounded", false)
+	_, err := engine.Invoke(ctx, contract.Principal{}, request)
+	var public *contract.Error
+	if !errors.As(err, &public) || public.Code != contract.ErrorInsufficientQuota {
+		t.Fatal(err)
+	}
+	admissions := store.Admissions()
+	if len(admissions) != 1 {
+		t.Fatalf("admissions=%+v", admissions)
+	}
+	admission := admissions[0]
+	if !admission.TokensBounded || !admission.PricesKnown || admission.PricingRevision != document.Revision || len(admission.Quotes) != 2 {
+		t.Fatalf("admission=%+v", admission)
+	}
+	var tokens, cost int64
+	for _, quote := range admission.Quotes {
+		tokens += quote.Usage.TotalTokens
+		cost += quote.Usage.CostMicros
+	}
+	if tokens != admission.EstimatedUsage.TotalTokens || cost != admission.EstimatedUsage.CostMicros || cost == 0 {
+		t.Fatalf("exposure=%+v", admission)
+	}
+	if len(provider.Attempts()) != 0 {
+		t.Fatal("denied budget reached provider")
+	}
+}

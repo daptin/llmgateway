@@ -626,7 +626,7 @@ func (e *Engine) Invoke(ctx context.Context, principal contract.Principal, reque
 			}
 			continue
 		}
-		usage, usageErr := settledUsage(response.Usage, prepared.request.EstimatedUsage, routeAttempt.Deployment.Pricing)
+		usage, usageErr := prepared.settledUsage(response.Usage, routeAttempt.Deployment.Pricing)
 		if usageErr != nil || !usage.Valid() {
 			normalized := publicError(contract.ErrorProvider, "provider returned invalid usage", 502, false, usageErr)
 			attempts = append(attempts, contract.Attempt{Number: attemptNumber, ProviderID: routeAttempt.Provider.ID, DeploymentID: routeAttempt.Deployment.ID, StartedAt: started, EndedAt: ended, Outcome: "failed", ErrorCode: normalized.Code, HTTPStatus: normalized.HTTPStatus, Usage: prepared.attemptExposure[index]})
@@ -679,6 +679,9 @@ type preparedRequest struct {
 	principal       contract.Principal
 	reserved        contract.Usage
 	attemptExposure []contract.Usage
+	pricesKnown     bool
+	boundedTokens   bool
+	quotes          []contract.ExposureQuote
 	responseID      contract.ID
 }
 
@@ -712,6 +715,11 @@ func (e *Engine) resolve(ctx context.Context, principal contract.Principal, requ
 	if err != nil {
 		return preparedRequest{}, publicError(contract.ErrorInternal, "failed to normalize model defaults", 500, false, err)
 	}
+	if contract.BoundedTokenExposure(ctx) {
+		if err := applyBoundedTextExposure(&request); err != nil {
+			return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "cannot bound text exposure", 400, false, err)
+		}
+	}
 	if err := applyRequestExposure(&request); err != nil {
 		return preparedRequest{}, publicError(contract.ErrorInvalidRequest, "request token exposure exceeds supported range", 400, false, err)
 	}
@@ -736,7 +744,7 @@ func (e *Engine) resolve(ctx context.Context, principal contract.Principal, requ
 	if err := e.checkInput(ctx, runtime, model, request); err != nil {
 		return preparedRequest{}, err
 	}
-	return preparedRequest{runtime: runtime, request: request, model: model, principal: principal}, nil
+	return preparedRequest{runtime: runtime, request: request, model: model, principal: principal, boundedTokens: contract.BoundedTokenExposure(ctx)}, nil
 }
 
 func (e *Engine) admit(ctx context.Context, principal contract.Principal, prepared preparedRequest) (preparedRequest, error) {
@@ -758,14 +766,27 @@ func (e *Engine) admit(ctx context.Context, principal contract.Principal, prepar
 	prepared.request.EstimatedUsage = attemptEstimate
 	prepared.plan = plan
 	prepared.attemptExposure = attemptExposure
+	prepared.pricesKnown = true
+	for index, attempt := range plan.Attempts {
+		prepared.pricesKnown = prepared.pricesKnown && tokenPricesKnown(attempt.Deployment.Pricing)
+		prepared.quotes = append(prepared.quotes, contract.ExposureQuote{DeploymentID: attempt.Deployment.ID, Rates: attempt.Deployment.Pricing.Rates, Usage: attemptExposure[index]})
+	}
 	return e.reserve(ctx, principal, prepared, exposure)
 }
 
 func (e *Engine) admitCached(ctx context.Context, principal contract.Principal, prepared preparedRequest, usage contract.Usage) (preparedRequest, error) {
+	if prepared.boundedTokens {
+		var err error
+		usage, err = prepared.settledUsage(usage, catalog.Pricing{})
+		if err != nil {
+			return preparedRequest{}, publicError(contract.ErrorInternal, "cached usage is invalid", 500, false, err)
+		}
+	}
 	if normalizeErr := normalizeTokenTotal(&usage); normalizeErr != nil || !usage.Valid() {
 		return preparedRequest{}, publicError(contract.ErrorInternal, "cached usage is invalid", 500, false, normalizeErr)
 	}
 	usage.CostMicros = 0
+	prepared.pricesKnown = true
 	return e.reserve(ctx, principal, prepared, usage)
 }
 
@@ -773,6 +794,7 @@ func (e *Engine) reserve(ctx context.Context, principal contract.Principal, prep
 	token, err := e.metering.Admit(ctx, contract.Admission{
 		Request: prepared.request, RequestID: prepared.request.ID, Principal: principal, ModelID: prepared.model.ID, Operation: prepared.request.Operation,
 		StartedAt: prepared.request.StartedAt, EstimatedUsage: exposure,
+		TokensBounded: contract.BoundedTokenExposure(ctx) && textExposureBounded(prepared.request), PricesKnown: prepared.pricesKnown, PricingRevision: prepared.runtime.catalog.Revision(), Quotes: prepared.quotes,
 	})
 	if err != nil {
 		if errors.Is(err, ErrAdmissionDenied) {

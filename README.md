@@ -64,6 +64,23 @@ are bounded by `MaxResponseHistoryBytes`. Streaming responses reserve an ID
 before provider I/O and save the completed snapshot before exposing the terminal
 event. Background execution is not supported.
 
+## Host-owned inference budgets
+
+Hosts can request conservative text-chat reservations with
+`contract.WithBoundedTokenExposure(ctx)`. This backend context is not an HTTP
+parameter. Admission exposes `TokensBounded`, `PricesKnown`, the catalog pricing
+revision and per-deployment exposure quotes for the complete retry/fallback plan.
+The host remains responsible for durable quota admission and settlement.
+
+Text exposure includes serialized conversation/tool bytes, framing allowance and
+the normalized output cap. Media and native external tools are not bounded by
+this estimator. Complete budget pricing requires input/output rates or a single
+total-token rate; explicit zero is free, while missing or mixed rates are unknown.
+Missing token categories retain conservative estimates during settlement and are
+marked estimated. These are configured-accounting bounds, not guarantees about
+unreported provider overhead or invoices. Ordinary requests retain their existing
+estimation behavior. HTTP, direct invocation and streaming share settlement.
+
 ## Development
 
 ```sh
